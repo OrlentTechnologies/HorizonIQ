@@ -115,16 +115,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         initial_hash=config_data[CONF_HASH],
         initial_registration=config_data[CONF_REGISTRATION_DATA],
     )
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     try:
         await coordinator.async_config_entry_first_refresh()
     except ConfigEntryNotReady as err:
         _LOGGER.warning(
-            "Initial refresh failed for entry %s; loading integration anyway so "
-            "registration data can still be cleared. Error: %s",
+            "Initial refresh failed for entry %s; Home Assistant will retry setup. "
+            "Error: %s",
             entry.entry_id,
             err,
         )
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        raise
+
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

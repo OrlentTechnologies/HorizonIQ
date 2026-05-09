@@ -17,6 +17,7 @@ from .const import (
     CONF_REGISTRATION_DATA,
     DEFAULT_FORECAST_CADENCE_MINUTES,
     DOMAIN,
+    FAILED_REFRESH_RETRY_SECONDS,
     REQUEST_TIMEOUT_SECONDS,
     normalize_environment,
 )
@@ -116,7 +117,13 @@ class MeshSolarCoordinator(DataUpdateCoordinator[MeshSolarSnapshot]):
             self._redacted_request_target(request_url),
         )
 
-        payload = await self._fetch_payload(request_url=request_url)
+        try:
+            payload = await self._fetch_payload(request_url=request_url)
+        except UpdateFailed as err:
+            raise UpdateFailed(
+                str(err),
+                retry_after=FAILED_REFRESH_RETRY_SECONDS,
+            ) from err
         snapshot = build_snapshot(payload)
         if snapshot.forecast_cadence_minutes is not None:
             self._set_forecast_cadence_minutes(snapshot.forecast_cadence_minutes)

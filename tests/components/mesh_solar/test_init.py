@@ -62,6 +62,36 @@ async def test_async_setup_entry_creates_coordinator_and_forwards_platforms(
     mock_forward.assert_awaited_once_with(mock_config_entry, PLATFORMS)
 
 
+async def test_async_setup_entry_retries_when_initial_refresh_fails(
+    hass,
+    mock_config_entry,
+) -> None:
+    """Initial refresh failures keep the config entry retryable."""
+    coordinator = MagicMock()
+    coordinator.async_config_entry_first_refresh = AsyncMock(
+        side_effect=ConfigEntryNotReady("api unavailable")
+    )
+
+    with (
+        patch("custom_components.mesh_solar._ensure_local_docs", AsyncMock()),
+        patch(
+            "custom_components.mesh_solar.MeshSolarCoordinator",
+            return_value=coordinator,
+        ),
+        patch.object(
+            hass.config_entries,
+            "async_forward_entry_setups",
+            AsyncMock(return_value=True),
+        ) as mock_forward,
+    ):
+        with pytest.raises(ConfigEntryNotReady):
+            await async_setup_entry(hass, mock_config_entry)
+
+    coordinator.async_config_entry_first_refresh.assert_awaited_once()
+    mock_forward.assert_not_awaited()
+    assert mock_config_entry.entry_id not in hass.data.get(DOMAIN, {})
+
+
 async def test_async_setup_entry_sets_cadence_sensor_from_forecast_payload(
     hass,
     entry_data: dict[str, str],

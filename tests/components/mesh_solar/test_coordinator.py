@@ -3,9 +3,13 @@
 from datetime import timedelta
 from unittest.mock import AsyncMock
 
+import pytest
+from homeassistant.helpers.update_coordinator import UpdateFailed
+
 from custom_components.mesh_solar.const import (
     CONF_HASH,
     CONF_REGISTRATION_DATA,
+    FAILED_REFRESH_RETRY_SECONDS,
     SANDBOX_ENVIRONMENT,
 )
 from custom_components.mesh_solar.coordinator import MeshSolarCoordinator
@@ -148,3 +152,29 @@ async def test_clear_registration_data_persists_and_refreshes(
     assert coordinator.update_interval == timedelta(minutes=5)
     assert mock_config_entry.data[CONF_REGISTRATION_DATA] == ""
     coordinator.async_request_refresh.assert_awaited_once()
+
+
+async def test_coordinator_failed_refresh_requests_one_minute_retry(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+    aioclient_mock,
+) -> None:
+    """Refresh failures ask Home Assistant to retry after one minute."""
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "53")
+
+    coordinator = MeshSolarCoordinator(
+        hass,
+        mock_config_entry,
+        entry_data["url"],
+        entry_data["api_key"],
+        entry_data["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+    )
+
+    aioclient_mock.get(coordinator._build_request_url("53"), status=500)
+
+    with pytest.raises(UpdateFailed) as exc_info:
+        await coordinator._async_update_data()
+
+    assert exc_info.value.retry_after == FAILED_REFRESH_RETRY_SECONDS
