@@ -17,6 +17,8 @@ from .const import DEFAULT_TITLE, DOMAIN
 class MeshSolarConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle Mesh Solar config and options flows."""
 
+    # Home Assistant config-entry schema version, not the integration release version.
+    # HACS and release automation use the version in manifest.json.
     VERSION = 1
 
     async def async_step_user(
