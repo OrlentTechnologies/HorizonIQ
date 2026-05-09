@@ -144,11 +144,31 @@ async def test_async_setup_entry_sets_cadence_sensor_from_forecast_payload(
     assert diagnostics_state.state == "1"
     assert diagnostics_state.attributes["environment"] == "Live"
     assert diagnostics_state.attributes["period_count"] == 1
+    forecast_attributes = diagnostics_state.attributes["forecast"]
+    assert forecast_attributes["calculated_on_utc"] == "2026-04-03T09:08:38.2671273Z"
+    assert forecast_attributes["low_price"] == 0.05
+    assert forecast_attributes["medium_price"] == 0.1
     assert diagnostics_state.attributes["forecast"]["forecast_cadence_minutes"] == 1
     assert (
         diagnostics_state.attributes["forecast"]["registration_data"]
         == "encrypted-registration-data-new"
     )
+    assert forecast_attributes["periods"] == [
+        {
+            "id": "7becc6a3-d881-420a-ab17-5c150044f008",
+            "period": 18,
+            "date": "2026-04-03T09:00:00Z",
+            "price": 0.1386,
+            "should_import": False,
+            "amount": 0.0,
+            "imported": 0.0,
+            "exported": 0.0,
+            "estimated_generation": 322.564985772249,
+            "used": 418.0,
+            "battery": 8464.0,
+            "battery_management_system_state": "0",
+        }
+    ]
     assert "registration" not in diagnostics_state.attributes
     assert "forecast_hash" not in diagnostics_state.attributes
     assert "forecast_date" not in diagnostics_state.attributes

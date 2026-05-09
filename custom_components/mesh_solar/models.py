@@ -24,6 +24,10 @@ class ForecastPeriod(TypedDict, total=False):
     price: float
     should_import: bool
     amount: float
+    imported: float
+    exported: float
+    estimated_generation: float
+    used: float
     battery: float
     bms_hold_period: bool
     battery_management_system_state: str
@@ -35,11 +39,14 @@ class ForecastData(TypedDict, total=False):
     id: str
     registration_id: str
     date: str
+    calculated_on_utc: str
     hash: str
     periods: list[ForecastPeriod]
     current_capacity: float
     min_capacity: float
     target_capacity: float
+    low_price: float
+    medium_price: float
     battery_management_system_state: str
     should_import: bool
     cloud_update_enabled: bool

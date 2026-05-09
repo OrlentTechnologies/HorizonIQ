@@ -121,7 +121,11 @@ def test_forecast_detail_sensor_uses_forecast_payload() -> None:
                 ],
             },
             forecast_periods=[
-                {"period": 1, "date": "2026-03-07T10:00:00+00:00"},
+                {
+                    "period": 1,
+                    "date": "2026-03-07T10:00:00+00:00",
+                    "history": [{"ignored": True}],
+                },
                 {"period": 2, "date": "2026-03-07T10:30:00+00:00"},
             ],
             registration={

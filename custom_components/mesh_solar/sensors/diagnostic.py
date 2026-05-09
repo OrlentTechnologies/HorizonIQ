@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 
 from homeassistant.components.sensor import SensorEntity
@@ -48,15 +49,35 @@ class ForecastDetailSensor(MeshSolarEntity, SensorEntity):
         if snapshot is None:
             return attrs
 
-        periods_payload = [dict(period) for period in snapshot.forecast_periods]
+        periods_payload = [
+            _period_diagnostics_payload(period) for period in snapshot.forecast_periods
+        ]
         attrs["period_count"] = len(periods_payload)
 
-        forecast = dict(snapshot.forecast)
+        forecast = deepcopy(snapshot.forecast)
         if forecast:
             if periods_payload:
                 forecast["periods"] = periods_payload
+            else:
+                forecast_periods = forecast.get("periods")
+                if isinstance(forecast_periods, list):
+                    forecast["periods"] = [
+                        _period_diagnostics_payload(period)
+                        if isinstance(period, Mapping)
+                        else period
+                        for period in forecast_periods
+                    ]
             attrs["forecast"] = forecast
         if snapshot.registration:
             attrs["registration"] = deepcopy(snapshot.registration)
 
         return attrs
+
+
+def _period_diagnostics_payload(period: Mapping[str, object]) -> dict[str, object]:
+    """Return the diagnostics-safe period payload without history details."""
+    return {
+        key: value
+        for key, value in period.items()
+        if str(key).lower() != "history"
+    }

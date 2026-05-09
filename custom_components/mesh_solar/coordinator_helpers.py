@@ -77,6 +77,35 @@ def normalize_periods(payload: Mapping[str, object] | None) -> list[ForecastPeri
         )
         _add_if_value(
             period,
+            "imported",
+            _coerce_float(extract_first(item, ("Imported", "imported"))),
+        )
+        _add_if_value(
+            period,
+            "exported",
+            _coerce_float(extract_first(item, ("Exported", "exported"))),
+        )
+        _add_if_value(
+            period,
+            "estimated_generation",
+            _coerce_float(
+                extract_first(
+                    item,
+                    (
+                        "EstimatedGeneration",
+                        "estimatedGeneration",
+                        "estimated_generation",
+                    ),
+                )
+            ),
+        )
+        _add_if_value(
+            period,
+            "used",
+            _coerce_float(extract_first(item, ("Used", "used"))),
+        )
+        _add_if_value(
+            period,
             "battery",
             _coerce_float(extract_first(item, ("Battery", "battery"))),
         )
@@ -150,6 +179,16 @@ def normalize_forecast(payload: Mapping[str, object] | None) -> ForecastData:
     )
     _add_if_value(
         normalized,
+        "calculated_on_utc",
+        _coerce_datetime(
+            extract_first(
+                forecast_source,
+                ("CalculatedOnUtc", "calculatedOnUtc", "calculated_on_utc"),
+            )
+        ),
+    )
+    _add_if_value(
+        normalized,
         "hash",
         _coerce_str(
             extract_first(
@@ -190,6 +229,26 @@ def normalize_forecast(payload: Mapping[str, object] | None) -> ForecastData:
             extract_first(
                 forecast_source,
                 ("TargetCapacity", "targetCapacity", "target_capacity"),
+            )
+        ),
+    )
+    _add_if_value(
+        normalized,
+        "low_price",
+        _coerce_float(
+            extract_first(
+                forecast_source,
+                ("LowPrice", "lowPrice", "low_price"),
+            )
+        ),
+    )
+    _add_if_value(
+        normalized,
+        "medium_price",
+        _coerce_float(
+            extract_first(
+                forecast_source,
+                ("MediumPrice", "mediumPrice", "medium_price"),
             )
         ),
     )
@@ -259,6 +318,20 @@ def normalize_forecast(payload: Mapping[str, object] | None) -> ForecastData:
         "saving",
         _coerce_float(
             extract_first(forecast_source, ("Saving", "saving", "savings"))
+        ),
+    )
+    _add_if_value(
+        normalized,
+        "forecast_cadence_minutes",
+        _coerce_positive_int(
+            extract_first(
+                forecast_source,
+                (
+                    "ForecastCadenceMinutes",
+                    "forecastCadenceMinutes",
+                    "forecast_cadence_minutes",
+                ),
+            )
         ),
     )
 
@@ -360,7 +433,9 @@ def build_snapshot(payload: Mapping[str, object] | None) -> MeshSolarSnapshot:
             ),
         )
     )
-    forecast_cadence_minutes = top_level_forecast_cadence_minutes
+    forecast_cadence_minutes = top_level_forecast_cadence_minutes or forecast.get(
+        "forecast_cadence_minutes"
+    )
     if forecast_cadence_minutes is None and registration:
         forecast_cadence_minutes = _coerce_positive_int(
             extract_first(
