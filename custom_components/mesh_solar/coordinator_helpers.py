@@ -5,7 +5,13 @@ from datetime import datetime
 from decimal import Decimal
 import json
 
-from .models import ForecastData, ForecastPeriod, MeshSolarSnapshot, RegistrationData
+from .models import (
+    ForecastData,
+    ForecastPeriod,
+    MeshSolarSnapshot,
+    RegistrationData,
+    TrialData,
+)
 
 
 def extract_first(payload: Mapping[str, object], keys: Iterable[str]) -> object | None:
@@ -334,8 +340,35 @@ def normalize_forecast(payload: Mapping[str, object] | None) -> ForecastData:
             )
         ),
     )
+    _add_trial_forecast_fields(normalized, normalize_trial(payload))
 
     return normalized
+
+
+def normalize_trial(payload: Mapping[str, object] | None) -> TrialData:
+    """Normalize app-trial metadata from forecast or trial payload containers."""
+    if not isinstance(payload, Mapping):
+        return {}
+
+    trial: TrialData = {}
+    for source, include_generic_status in _trial_sources(payload):
+        has_trial_state = _has_trial_state_key(source)
+        source_is_trial = (
+            include_generic_status
+            or has_trial_state
+            or _has_authorization_key(source)
+        )
+        if not source_is_trial:
+            continue
+        source_trial = _normalize_trial_source(
+            source,
+            include_generic_status=include_generic_status or has_trial_state,
+        )
+        for key, value in source_trial.items():
+            if key not in trial:
+                trial[key] = value
+
+    return trial
 
 
 def normalize_registration(payload: Mapping[str, object] | None) -> RegistrationData:
@@ -385,6 +418,7 @@ def build_snapshot(payload: Mapping[str, object] | None) -> MeshSolarSnapshot:
         return MeshSolarSnapshot()
 
     forecast = dict(normalize_forecast(payload))
+    trial = normalize_trial(payload)
     periods = forecast.get("periods") or normalize_periods(payload)
     if periods:
         forecast["periods"] = periods
@@ -447,6 +481,8 @@ def build_snapshot(payload: Mapping[str, object] | None) -> MeshSolarSnapshot:
                 ),
             )
         )
+    if forecast_cadence_minutes is None:
+        forecast_cadence_minutes = trial.get("forecast_cadence_minutes")
     currency = _coerce_str(
         extract_first(payload, ("currency", "Currency", "currencyCode", "CurrencyCode"))
     )
@@ -467,6 +503,7 @@ def build_snapshot(payload: Mapping[str, object] | None) -> MeshSolarSnapshot:
 
     return MeshSolarSnapshot(
         forecast=forecast,
+        trial=trial,
         forecast_periods=periods,
         registration=registration,
         currency=currency,
@@ -509,11 +546,276 @@ def _extract_registration_data_value(payload: Mapping[str, object]) -> object | 
     return None
 
 
-def _payload_containers(payload: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
+def _payload_containers(
+    payload: Mapping[str, object],
+) -> tuple[Mapping[str, object], ...]:
     forecast_source = _extract_forecast_source(payload)
     if forecast_source is payload:
         return (payload,)
     return (payload, forecast_source)
+
+
+def _trial_sources(
+    payload: Mapping[str, object],
+) -> tuple[tuple[Mapping[str, object], bool], ...]:
+    sources: list[tuple[Mapping[str, object], bool]] = []
+    seen: set[int] = set()
+
+    def add_source(source: Mapping[str, object], include_generic_status: bool) -> None:
+        source_id = id(source)
+        if source_id in seen:
+            return
+        seen.add(source_id)
+        sources.append((source, include_generic_status))
+
+    for container in _payload_containers(payload):
+        for key in (
+            "Trial",
+            "trial",
+            "TrialInfo",
+            "trialInfo",
+            "trial_info",
+            "TrialState",
+            "trialState",
+            "trial_state",
+        ):
+            candidate = container.get(key)
+            if isinstance(candidate, Mapping):
+                add_source(candidate, True)
+
+    for container in _payload_containers(payload):
+        add_source(container, False)
+
+    return tuple(sources)
+
+
+def _normalize_trial_source(
+    source: Mapping[str, object],
+    *,
+    include_generic_status: bool,
+) -> TrialData:
+    trial: TrialData = {}
+
+    _add_if_value(
+        trial,
+        "has_trial",
+        _coerce_bool(extract_first(source, ("HasTrial", "hasTrial", "has_trial"))),
+    )
+    _add_if_value(
+        trial,
+        "is_active",
+        _coerce_bool(extract_first(source, ("IsActive", "isActive", "is_active"))),
+    )
+    _add_if_value(
+        trial,
+        "is_eligible",
+        _coerce_bool(
+            extract_first(source, ("IsEligible", "isEligible", "is_eligible"))
+        ),
+    )
+
+    status_keys = ["TrialStatus", "trialStatus", "trial_status"]
+    if include_generic_status:
+        status_keys.extend(("Status", "status"))
+    _add_if_value(
+        trial,
+        "status",
+        _coerce_str(extract_first(source, status_keys)),
+    )
+    _add_if_value(
+        trial,
+        "starts_on_utc",
+        _coerce_datetime(
+            extract_first(
+                source,
+                (
+                    "TrialStartsOnUtc",
+                    "trialStartsOnUtc",
+                    "trial_starts_on_utc",
+                    "StartsOnUtc",
+                    "startsOnUtc",
+                    "starts_on_utc",
+                ),
+            )
+        ),
+    )
+    _add_if_value(
+        trial,
+        "expires_on_utc",
+        _coerce_datetime(
+            extract_first(
+                source,
+                (
+                    "TrialExpiresOnUtc",
+                    "trialExpiresOnUtc",
+                    "trial_expires_on_utc",
+                    "ExpiresOnUtc",
+                    "expiresOnUtc",
+                    "expires_on_utc",
+                ),
+            )
+        ),
+    )
+    _add_if_value(
+        trial,
+        "forecast_cadence_minutes",
+        _coerce_positive_int(
+            extract_first(
+                source,
+                (
+                    "TrialForecastCadenceMinutes",
+                    "trialForecastCadenceMinutes",
+                    "trial_forecast_cadence_minutes",
+                    "ForecastCadenceMinutes",
+                    "forecastCadenceMinutes",
+                    "forecast_cadence_minutes",
+                ),
+            )
+        ),
+    )
+    _add_if_value(
+        trial,
+        "device_display_name",
+        _coerce_str(
+            extract_first(
+                source,
+                (
+                    "TrialDeviceDisplayName",
+                    "trialDeviceDisplayName",
+                    "trial_device_display_name",
+                    "DeviceDisplayName",
+                    "deviceDisplayName",
+                    "device_display_name",
+                ),
+            )
+        ),
+    )
+    _add_if_value(
+        trial,
+        "authorization_status",
+        _coerce_str(
+            extract_first(
+                source,
+                ("AuthorizationStatus", "authorizationStatus", "authorization_status"),
+            )
+        ),
+    )
+    _add_if_value(
+        trial,
+        "authorization_status_code",
+        _coerce_int(
+            extract_first(
+                source,
+                (
+                    "AuthorizationStatusCode",
+                    "authorizationStatusCode",
+                    "authorization_status_code",
+                ),
+            )
+        ),
+    )
+    _add_if_value(
+        trial,
+        "authorization_message",
+        _coerce_str(
+            extract_first(
+                source,
+                (
+                    "AuthorizationMessage",
+                    "authorizationMessage",
+                    "authorization_message",
+                ),
+            )
+        ),
+    )
+
+    return trial
+
+
+def _add_trial_forecast_fields(
+    forecast: ForecastData,
+    trial: Mapping[str, object],
+) -> None:
+    _add_if_value(forecast, "trial_has_trial", trial.get("has_trial"))
+    _add_if_value(forecast, "trial_is_active", trial.get("is_active"))
+    _add_if_value(forecast, "trial_is_eligible", trial.get("is_eligible"))
+    _add_if_value(forecast, "trial_status", trial.get("status"))
+    _add_if_value(forecast, "trial_starts_on_utc", trial.get("starts_on_utc"))
+    _add_if_value(forecast, "trial_expires_on_utc", trial.get("expires_on_utc"))
+    _add_if_value(
+        forecast,
+        "trial_forecast_cadence_minutes",
+        trial.get("forecast_cadence_minutes"),
+    )
+    _add_if_value(
+        forecast,
+        "trial_device_display_name",
+        trial.get("device_display_name"),
+    )
+    _add_if_value(
+        forecast,
+        "authorization_status",
+        trial.get("authorization_status"),
+    )
+    _add_if_value(
+        forecast,
+        "authorization_status_code",
+        trial.get("authorization_status_code"),
+    )
+    _add_if_value(
+        forecast,
+        "authorization_message",
+        trial.get("authorization_message"),
+    )
+
+
+def _has_trial_specific_key(payload: Mapping[str, object]) -> bool:
+    return _has_trial_state_key(payload) or _has_authorization_key(payload)
+
+
+def _has_trial_state_key(payload: Mapping[str, object]) -> bool:
+    trial_keys = (
+        "HasTrial",
+        "hasTrial",
+        "has_trial",
+        "IsActive",
+        "isActive",
+        "is_active",
+        "IsEligible",
+        "isEligible",
+        "is_eligible",
+        "TrialStatus",
+        "trialStatus",
+        "trial_status",
+        "TrialStartsOnUtc",
+        "trialStartsOnUtc",
+        "trial_starts_on_utc",
+        "TrialExpiresOnUtc",
+        "trialExpiresOnUtc",
+        "trial_expires_on_utc",
+        "TrialForecastCadenceMinutes",
+        "trialForecastCadenceMinutes",
+        "trial_forecast_cadence_minutes",
+        "TrialDeviceDisplayName",
+        "trialDeviceDisplayName",
+        "trial_device_display_name",
+    )
+    return any(key in payload for key in trial_keys)
+
+
+def _has_authorization_key(payload: Mapping[str, object]) -> bool:
+    authorization_keys = (
+        "AuthorizationStatus",
+        "authorizationStatus",
+        "authorization_status",
+        "AuthorizationStatusCode",
+        "authorizationStatusCode",
+        "authorization_status_code",
+        "AuthorizationMessage",
+        "authorizationMessage",
+        "authorization_message",
+    )
+    return any(key in payload for key in authorization_keys)
 
 
 def _looks_like_registration_payload(payload: Mapping[str, object]) -> bool:
@@ -558,6 +860,38 @@ def _looks_like_registration_payload(payload: Mapping[str, object]) -> bool:
         "BatteryManagementSystemState",
         "batteryManagementSystemState",
         "battery_management_system_state",
+        "HasTrial",
+        "hasTrial",
+        "has_trial",
+        "IsActive",
+        "isActive",
+        "is_active",
+        "IsEligible",
+        "isEligible",
+        "is_eligible",
+        "TrialStatus",
+        "trialStatus",
+        "trial_status",
+        "Status",
+        "status",
+        "StartsOnUtc",
+        "startsOnUtc",
+        "starts_on_utc",
+        "ExpiresOnUtc",
+        "expiresOnUtc",
+        "expires_on_utc",
+        "DeviceDisplayName",
+        "deviceDisplayName",
+        "device_display_name",
+        "AuthorizationStatus",
+        "authorizationStatus",
+        "authorization_status",
+        "AuthorizationStatusCode",
+        "authorizationStatusCode",
+        "authorization_status_code",
+        "AuthorizationMessage",
+        "authorizationMessage",
+        "authorization_message",
     )
     if any(key in payload for key in forecast_keys):
         return False
@@ -593,6 +927,10 @@ def _looks_like_registration_payload(payload: Mapping[str, object]) -> bool:
         "solisCloud",
     )
     return any(key in payload for key in registration_keys)
+
+
+def _has_trial_payload(payload: Mapping[str, object]) -> bool:
+    return bool(normalize_trial(payload))
 
 
 def _coerce_int(value: object) -> int | None:

@@ -69,12 +69,14 @@ Behavior:
 - `Mesh Solar Saving` (monetary)
 - `Mesh Solar Forecast Diagnostics` (diagnostic)
 - `Mesh Solar BMS State`
+- `Mesh Solar Trial Status` (diagnostic)
 
 Behavior:
 - Monetary sensors read values from API payload keys like `TotalCost`, `ChargingCost`, `Saving`.
 - Currency is taken from API (`currency`, `Currency`, etc.) when present.
-- Forecast Diagnostics state is the number of forecast periods.
+- Forecast Diagnostics state is the number of forecast periods and its attributes include trial status details when returned by the API.
 - BMS State is derived from top-level forecast state, otherwise current/upcoming period state.
+- Trial Status reads app-trial fields like `hasTrial`, `isActive`, `isEligible`, `status`, `startsOnUtc`, `expiresOnUtc`, and `deviceDisplayName`. If the forecast endpoint returns HTTP 401, the integration still loads and the sensor shows `unauthorized` with authorization diagnostics.
 
 ### Button
 
@@ -110,6 +112,7 @@ The Home Assistant Installation ID shown in the config/options flow is read from
 - Normalized forecast object and periods
 - Derived `currency`
 - Derived `target_capacity`
+- App trial status details from the latest forecast response
 - Last update success status
 
 ## Request/Response Notes

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from datetime import timedelta
 from http import HTTPStatus
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from aiohttp import ClientError
+from aiohttp import ClientError, ClientResponse, ContentTypeError
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -27,6 +28,7 @@ from .const import (
 from .coordinator_helpers import (
     build_snapshot,
     extract_forecast_cadence_minutes_from_registration_data,
+    normalize_trial,
 )
 from .models import ForecastData, ForecastPeriod, MeshSolarSnapshot
 
@@ -183,17 +185,70 @@ class MeshSolarCoordinator(DataUpdateCoordinator[MeshSolarSnapshot]):
             async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
                 async with self._session.get(request_url, headers=headers) as response:
                     if response.status != HTTPStatus.OK:
+                        if response.status == HTTPStatus.UNAUTHORIZED:
+                            payload = await self._read_optional_json_payload(response)
+                            _LOGGER.info(
+                                "Mesh Solar API returned unauthorized forecast "
+                                "response for entry %s",
+                                self._entry.entry_id,
+                            )
+                            return self._authorization_diagnostic_payload(
+                                response=response,
+                                payload=payload,
+                            )
                         raise UpdateFailed(f"API returned status {response.status}")
-                    payload = await response.json()
+                    payload = await self._read_json_payload(response)
         except TimeoutError as err:
             raise UpdateFailed("Timed out fetching Mesh Solar data") from err
         except ClientError as err:
             raise UpdateFailed(f"Error communicating with Mesh Solar API: {err}") from err
-        except ValueError as err:
-            raise UpdateFailed("Mesh Solar API returned invalid JSON") from err
 
         if not isinstance(payload, dict):
             raise UpdateFailed("Mesh Solar API returned an unexpected payload shape")
+        return payload
+
+    @staticmethod
+    def _authorization_diagnostic_payload(
+        *,
+        response: ClientResponse,
+        payload: Mapping[str, object] | None,
+    ) -> dict[str, object]:
+        diagnostic_payload = dict(payload or {})
+        diagnostic_payload.setdefault("AuthorizationStatus", "unauthorized")
+        diagnostic_payload.setdefault("AuthorizationStatusCode", response.status)
+        diagnostic_payload.setdefault(
+            "AuthorizationMessage",
+            "Forecast request was rejected with HTTP 401 Unauthorized.",
+        )
+
+        if normalize_trial(diagnostic_payload):
+            return diagnostic_payload
+
+        return {
+            "AuthorizationStatus": "unauthorized",
+            "AuthorizationStatusCode": response.status,
+            "AuthorizationMessage": (
+                "Forecast request was rejected with HTTP 401 Unauthorized."
+            ),
+        }
+
+    async def _read_json_payload(self, response: ClientResponse) -> object:
+        try:
+            return await response.json(content_type=None)
+        except (ContentTypeError, ValueError) as err:
+            raise UpdateFailed("Mesh Solar API returned invalid JSON") from err
+
+    @staticmethod
+    async def _read_optional_json_payload(
+        response: ClientResponse,
+    ) -> dict[str, object] | None:
+        try:
+            payload = await response.json(content_type=None)
+        except (ContentTypeError, ValueError):
+            return None
+
+        if not isinstance(payload, dict):
+            return None
         return payload
 
     def _build_request_headers(self) -> dict[str, str]:

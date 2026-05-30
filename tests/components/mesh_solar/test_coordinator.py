@@ -234,6 +234,96 @@ async def test_forecast_request_omits_trial_headers_when_blank(
     assert "integrationSource" not in headers
 
 
+async def test_coordinator_uses_trial_payload_from_unauthorized_response(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+    aioclient_mock,
+) -> None:
+    """A 401 carrying trial state still produces a usable coordinator snapshot."""
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "53")
+
+    coordinator = MeshSolarCoordinator(
+        hass,
+        mock_config_entry,
+        entry_data["url"],
+        entry_data["api_key"],
+        entry_data["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+        forecast_device_id="gx-device-1",
+        forecast_device_token="trial-token",
+    )
+
+    aioclient_mock.get(
+        coordinator._build_request_url("53"),
+        status=401,
+        json={
+            "hasTrial": True,
+            "isActive": False,
+            "isEligible": False,
+            "status": "expired",
+            "forecastCadenceMinutes": 30,
+        },
+    )
+
+    snapshot = await coordinator._async_update_data()
+
+    assert snapshot.trial == {
+        "has_trial": True,
+        "is_active": False,
+        "is_eligible": False,
+        "status": "expired",
+        "forecast_cadence_minutes": 30,
+        "authorization_status": "unauthorized",
+        "authorization_status_code": 401,
+        "authorization_message": (
+            "Forecast request was rejected with HTTP 401 Unauthorized."
+        ),
+    }
+    assert snapshot.forecast["trial_status"] == "expired"
+    assert coordinator.forecast_cadence_minutes == 30
+    assert coordinator.update_interval == timedelta(minutes=30)
+
+
+async def test_coordinator_uses_diagnostic_payload_from_plain_unauthorized_response(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+    aioclient_mock,
+) -> None:
+    """A plain 401 still creates diagnostic state instead of blocking setup."""
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "53")
+
+    coordinator = MeshSolarCoordinator(
+        hass,
+        mock_config_entry,
+        entry_data["url"],
+        entry_data["api_key"],
+        entry_data["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+        forecast_device_id="gx-device-1",
+        forecast_device_token="trial-token",
+    )
+
+    aioclient_mock.get(
+        coordinator._build_request_url("53"),
+        status=401,
+        json={"status": 401, "message": "Unauthorized"},
+    )
+
+    snapshot = await coordinator._async_update_data()
+
+    assert snapshot.trial == {
+        "authorization_status": "unauthorized",
+        "authorization_status_code": 401,
+        "authorization_message": (
+            "Forecast request was rejected with HTTP 401 Unauthorized."
+        ),
+    }
+    assert snapshot.forecast["authorization_status"] == "unauthorized"
+    assert snapshot.forecast_periods == []
+
+
 async def test_coordinator_failed_refresh_requests_one_minute_retry(
     hass,
     mock_config_entry,

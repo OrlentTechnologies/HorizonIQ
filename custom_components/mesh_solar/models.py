@@ -58,6 +58,33 @@ class ForecastData(TypedDict, total=False):
     charging_cost: float
     saving: float
     forecast_cadence_minutes: int
+    trial_has_trial: bool
+    trial_is_active: bool
+    trial_is_eligible: bool
+    trial_status: str
+    trial_starts_on_utc: str
+    trial_expires_on_utc: str
+    trial_forecast_cadence_minutes: int
+    trial_device_display_name: str
+    authorization_status: str
+    authorization_status_code: int
+    authorization_message: str
+
+
+class TrialData(TypedDict, total=False):
+    """Normalized app trial payload."""
+
+    has_trial: bool
+    is_active: bool
+    is_eligible: bool
+    status: str
+    starts_on_utc: str
+    expires_on_utc: str
+    forecast_cadence_minutes: int
+    device_display_name: str
+    authorization_status: str
+    authorization_status_code: int
+    authorization_message: str
 
 
 RegistrationData = dict[str, object]
@@ -68,6 +95,7 @@ class MeshSolarSnapshot:
     """Typed coordinator snapshot consumed by entities."""
 
     forecast: ForecastData = field(default_factory=dict)
+    trial: TrialData = field(default_factory=dict)
     forecast_periods: list[ForecastPeriod] = field(default_factory=list)
     registration: RegistrationData = field(default_factory=dict)
     currency: str | None = None

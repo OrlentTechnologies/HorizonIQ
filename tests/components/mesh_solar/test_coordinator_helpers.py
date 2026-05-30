@@ -7,6 +7,7 @@ from custom_components.mesh_solar.coordinator_helpers import (
     normalize_forecast,
     normalize_registration,
     normalize_periods,
+    normalize_trial,
 )
 from custom_components.mesh_solar.models import MeshSolarSnapshot
 
@@ -109,6 +110,118 @@ def test_normalize_forecast_extracts_primary_fields() -> None:
         "charging_cost": 0.45,
         "saving": 0.78,
     }
+
+
+def test_normalize_forecast_extracts_trial_fields() -> None:
+    """Forecast normalization exposes app-trial state."""
+    payload = {
+        "hasTrial": True,
+        "isActive": False,
+        "isEligible": False,
+        "status": "expired",
+        "startsOnUtc": "2026-05-01T00:00:00Z",
+        "expiresOnUtc": "2026-05-15T00:00:00Z",
+        "forecastCadenceMinutes": 30,
+        "deviceDisplayName": "GX device",
+    }
+
+    forecast = normalize_forecast(payload)
+
+    assert forecast["trial_has_trial"] is True
+    assert forecast["trial_is_active"] is False
+    assert forecast["trial_is_eligible"] is False
+    assert forecast["trial_status"] == "expired"
+    assert forecast["trial_starts_on_utc"] == "2026-05-01T00:00:00Z"
+    assert forecast["trial_expires_on_utc"] == "2026-05-15T00:00:00Z"
+    assert forecast["forecast_cadence_minutes"] == 30
+    assert forecast["trial_forecast_cadence_minutes"] == 30
+    assert forecast["trial_device_display_name"] == "GX device"
+    assert normalize_trial(payload) == {
+        "has_trial": True,
+        "is_active": False,
+        "is_eligible": False,
+        "status": "expired",
+        "starts_on_utc": "2026-05-01T00:00:00Z",
+        "expires_on_utc": "2026-05-15T00:00:00Z",
+        "forecast_cadence_minutes": 30,
+        "device_display_name": "GX device",
+    }
+
+
+def test_normalize_forecast_extracts_top_level_trial_with_nested_forecast() -> None:
+    """Top-level trial metadata is preserved when forecast data is nested."""
+    payload = {
+        "Forecast": {
+            "Hash": "hash-123",
+            "Periods": [{"Period": 1, "Date": "2026-05-01T00:00:00Z"}],
+        },
+        "hasTrial": True,
+        "isActive": True,
+        "isEligible": False,
+        "status": "active",
+    }
+
+    snapshot = build_snapshot(payload)
+
+    assert snapshot.trial == {
+        "has_trial": True,
+        "is_active": True,
+        "is_eligible": False,
+        "status": "active",
+    }
+    assert snapshot.forecast["trial_status"] == "active"
+    assert snapshot.forecast["trial_is_active"] is True
+
+
+def test_normalize_trial_extracts_nested_trial_container() -> None:
+    """Trial metadata may arrive in a dedicated trial object."""
+    payload = {
+        "Forecast": {"Hash": "hash-123"},
+        "trial": {
+            "hasTrial": False,
+            "isActive": False,
+            "isEligible": True,
+            "status": "eligible",
+            "forecastCadenceMinutes": 30,
+        },
+    }
+
+    snapshot = build_snapshot(payload)
+
+    assert snapshot.trial == {
+        "has_trial": False,
+        "is_active": False,
+        "is_eligible": True,
+        "status": "eligible",
+        "forecast_cadence_minutes": 30,
+    }
+    assert snapshot.forecast["trial_status"] == "eligible"
+    assert snapshot.forecast_cadence_minutes == 30
+
+
+def test_build_snapshot_keeps_trial_payload_out_of_registration() -> None:
+    """Trial-only payloads are treated as forecast diagnostics, not registration."""
+    payload = {
+        "hasTrial": False,
+        "isActive": False,
+        "isEligible": True,
+        "status": "eligible",
+    }
+
+    assert build_snapshot(payload) == MeshSolarSnapshot(
+        forecast={
+            "trial_has_trial": False,
+            "trial_is_active": False,
+            "trial_is_eligible": True,
+            "trial_status": "eligible",
+        },
+        trial={
+            "has_trial": False,
+            "is_active": False,
+            "is_eligible": True,
+            "status": "eligible",
+        },
+    )
 
 
 def test_normalize_registration_extracts_json_payload_from_registration_data() -> None:

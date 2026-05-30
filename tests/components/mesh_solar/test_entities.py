@@ -18,6 +18,7 @@ from custom_components.mesh_solar.sensors.bms_state import (
 from custom_components.mesh_solar.sensors.cadence import ForecastCadenceSensor
 from custom_components.mesh_solar.sensors.diagnostic import ForecastDetailSensor
 from custom_components.mesh_solar.sensors.monetary import MonetarySensor
+from custom_components.mesh_solar.sensors.trial import TrialStatusSensor
 
 
 class DummyCoordinator(SimpleNamespace):
@@ -210,6 +211,161 @@ def test_forecast_detail_sensor_redacts_trial_binding_values() -> None:
     assert attrs["registration"]["trialDeviceToken"] == "REDACTED"
 
 
+def test_forecast_detail_sensor_exposes_trial_state() -> None:
+    """Forecast diagnostics includes normalized trial state."""
+    coordinator = _build_coordinator(
+        data=MeshSolarSnapshot(
+            trial={
+                "has_trial": True,
+                "is_active": False,
+                "is_eligible": False,
+                "status": "expired",
+                "forecast_cadence_minutes": 30,
+            },
+        )
+    )
+
+    entity = ForecastDetailSensor(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
+    attrs = entity.extra_state_attributes
+
+    assert entity.native_value == 0
+    assert attrs["trial_status"] == "expired"
+    assert attrs["trial"] == {
+        "has_trial": True,
+        "is_active": False,
+        "is_eligible": False,
+        "status": "expired",
+        "forecast_cadence_minutes": 30,
+    }
+
+
+def test_forecast_detail_sensor_exposes_authorization_state() -> None:
+    """Forecast diagnostics includes authorization failures."""
+    coordinator = _build_coordinator(
+        data=MeshSolarSnapshot(
+            trial={
+                "authorization_status": "unauthorized",
+                "authorization_status_code": 401,
+                "authorization_message": (
+                    "Forecast request was rejected with HTTP 401 Unauthorized."
+                ),
+            },
+        )
+    )
+
+    entity = ForecastDetailSensor(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
+    attrs = entity.extra_state_attributes
+
+    assert entity.native_value == 0
+    assert attrs["authorization_status"] == "unauthorized"
+    assert attrs["authorization_status_code"] == 401
+    assert attrs["trial"] == {
+        "authorization_status": "unauthorized",
+        "authorization_status_code": 401,
+        "authorization_message": (
+            "Forecast request was rejected with HTTP 401 Unauthorized."
+        ),
+    }
+
+
+def test_trial_status_sensor_exposes_trial_state() -> None:
+    """Trial status entity exposes active/eligible flags and dates."""
+    coordinator = _build_coordinator(
+        data=MeshSolarSnapshot(
+            trial={
+                "has_trial": True,
+                "is_active": False,
+                "is_eligible": False,
+                "status": "expired",
+                "starts_on_utc": "2026-05-01T00:00:00Z",
+                "expires_on_utc": "2026-05-15T00:00:00Z",
+                "forecast_cadence_minutes": 30,
+                "device_display_name": "GX device",
+            }
+        )
+    )
+
+    entity = TrialStatusSensor(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
+
+    assert entity.native_value == "expired"
+    assert entity.available is True
+    assert entity.extra_state_attributes == {
+        "environment": SANDBOX_ENVIRONMENT,
+        "has_trial": True,
+        "is_active": False,
+        "is_eligible": False,
+        "status": "expired",
+        "starts_on_utc": "2026-05-01T00:00:00Z",
+        "expires_on_utc": "2026-05-15T00:00:00Z",
+        "forecast_cadence_minutes": 30,
+        "device_display_name": "GX device",
+    }
+
+
+def test_trial_status_sensor_falls_back_to_eligibility_state() -> None:
+    """Trial status entity remains useful when upstream status is absent."""
+    coordinator = _build_coordinator(
+        data=MeshSolarSnapshot(
+            forecast={
+                "trial_has_trial": False,
+                "trial_is_active": False,
+                "trial_is_eligible": True,
+            }
+        )
+    )
+
+    entity = TrialStatusSensor(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
+
+    assert entity.native_value == "eligible"
+    assert entity.extra_state_attributes == {
+        "environment": SANDBOX_ENVIRONMENT,
+        "has_trial": False,
+        "is_active": False,
+        "is_eligible": True,
+    }
+
+
+def test_trial_status_sensor_stays_available_with_cached_trial_state() -> None:
+    """Trial status remains clickable when later coordinator refreshes fail."""
+    coordinator = _build_coordinator(
+        data=MeshSolarSnapshot(trial={"status": "expired"}),
+        last_update_success=False,
+    )
+
+    entity = TrialStatusSensor(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
+
+    assert entity.available is True
+    assert entity.native_value == "expired"
+
+
+def test_trial_status_sensor_exposes_authorization_state() -> None:
+    """Trial status falls back to authorization state when no trial status exists."""
+    coordinator = _build_coordinator(
+        data=MeshSolarSnapshot(
+            trial={
+                "authorization_status": "unauthorized",
+                "authorization_status_code": 401,
+                "authorization_message": (
+                    "Forecast request was rejected with HTTP 401 Unauthorized."
+                ),
+            }
+        )
+    )
+
+    entity = TrialStatusSensor(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
+
+    assert entity.available is True
+    assert entity.native_value == "unauthorized"
+    assert entity.extra_state_attributes == {
+        "environment": SANDBOX_ENVIRONMENT,
+        "authorization_status": "unauthorized",
+        "authorization_status_code": 401,
+        "authorization_message": (
+            "Forecast request was rejected with HTTP 401 Unauthorized."
+        ),
+    }
+
+
 def test_bms_sensor_uses_current_period_when_forecast_state_missing(monkeypatch) -> None:
     """BMS state falls back to the active period."""
     now = dt_util.parse_datetime("2026-03-07T10:15:00+00:00")
@@ -297,3 +453,6 @@ def test_default_environment_unique_ids_include_entry_id() -> None:
     assert sensor.unique_id == "mesh_solar_entry-1_total_cost"
     assert cadence.unique_id == "mesh_solar_entry-1_forecast_cadence"
     assert button.unique_id == "mesh_solar_entry-1_clear_registration"
+
+    trial = TrialStatusSensor(coordinator, "entry-1", DEFAULT_ENVIRONMENT)
+    assert trial.unique_id == "mesh_solar_entry-1_trial_status"

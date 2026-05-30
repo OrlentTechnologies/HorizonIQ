@@ -6,6 +6,7 @@ This repository is a Home Assistant custom integration.
 * Keep code in the integration-style layout used by this repo and do not introduce a `src/` layout
 * Use Home Assistant config entries, options flows, and integration storage patterns for configuration
 * Apply only the guidance in this file that is relevant to the task at hand
+* Always update the manifest version when making a set of changes.
 
 ## Folder Structure
 

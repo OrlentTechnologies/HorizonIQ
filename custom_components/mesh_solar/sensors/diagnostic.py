@@ -37,7 +37,7 @@ class ForecastDetailSensor(MeshSolarEntity, SensorEntity):
     def native_value(self) -> int | None:
         """Return the number of forecast periods in the current snapshot."""
         snapshot = self.snapshot
-        if snapshot is None or not snapshot.forecast_periods:
+        if snapshot is None:
             return None
         return len(snapshot.forecast_periods)
 
@@ -71,6 +71,18 @@ class ForecastDetailSensor(MeshSolarEntity, SensorEntity):
                         for period in forecast_periods
                     ]
             attrs["forecast"] = forecast
+        if snapshot.trial:
+            trial = _diagnostics_safe_payload(snapshot.trial)
+            status = trial.get("status")
+            if status is not None:
+                attrs["trial_status"] = status
+            authorization_status = trial.get("authorization_status")
+            if authorization_status is not None:
+                attrs["authorization_status"] = authorization_status
+            authorization_status_code = trial.get("authorization_status_code")
+            if authorization_status_code is not None:
+                attrs["authorization_status_code"] = authorization_status_code
+            attrs["trial"] = trial
         if snapshot.registration:
             attrs["registration"] = _diagnostics_safe_payload(snapshot.registration)
 

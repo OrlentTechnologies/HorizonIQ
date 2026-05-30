@@ -10,6 +10,7 @@ from .cadence import ForecastCadenceSensor
 from .monetary import MonetarySensor
 from .diagnostic import ForecastDetailSensor
 from .bms_state import BatteryManagementSystemStateSensor
+from .trial import TrialStatusSensor
 
 
 async def async_setup_entry(
@@ -60,6 +61,11 @@ async def async_setup_entry(
                 environment,
             ),
             BatteryManagementSystemStateSensor(
+                coordinator,
+                config_entry.entry_id,
+                environment,
+            ),
+            TrialStatusSensor(
                 coordinator,
                 config_entry.entry_id,
                 environment,

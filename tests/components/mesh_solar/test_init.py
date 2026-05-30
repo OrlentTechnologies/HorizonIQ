@@ -146,6 +146,10 @@ async def test_async_setup_entry_sets_cadence_sensor_from_forecast_payload(
         "shouldImport": False,
         "cloudUpdateEnabled": False,
         "forecastCadenceMinutes": 1,
+        "hasTrial": True,
+        "isActive": True,
+        "isEligible": False,
+        "status": "active",
         "registrationData": "encrypted-registration-data-new",
         "totalCost": 1.340718750000001,
         "chargingCost": 0.40609296,
@@ -183,6 +187,14 @@ async def test_async_setup_entry_sets_cadence_sensor_from_forecast_payload(
     assert forecast_attributes["low_price"] == 0.05
     assert forecast_attributes["medium_price"] == 0.1
     assert diagnostics_state.attributes["forecast"]["forecast_cadence_minutes"] == 1
+    assert diagnostics_state.attributes["trial_status"] == "active"
+    assert diagnostics_state.attributes["trial"] == {
+        "has_trial": True,
+        "is_active": True,
+        "is_eligible": False,
+        "status": "active",
+        "forecast_cadence_minutes": 1,
+    }
     assert (
         diagnostics_state.attributes["forecast"]["registration_data"]
         == "encrypted-registration-data-new"
@@ -208,6 +220,56 @@ async def test_async_setup_entry_sets_cadence_sensor_from_forecast_payload(
     assert "forecast_date" not in diagnostics_state.attributes
     assert "target_capacity" not in diagnostics_state.attributes
     assert "forecast_cadence_minutes" not in diagnostics_state.attributes
+
+    trial_state = hass.states.get("sensor.mesh_solar_trial_status")
+    assert trial_state is not None
+    assert trial_state.state == "active"
+    assert trial_state.attributes["is_active"] is True
+
+
+async def test_async_setup_entry_loads_entities_when_initial_refresh_is_unauthorized(
+    hass,
+    entry_data: dict[str, str],
+    aioclient_mock,
+) -> None:
+    """An initial 401 loads diagnostic entities instead of blocking setup."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Mesh Solar",
+        data={
+            **entry_data,
+            CONF_FORECAST_DEVICE_ID: "gx-device-1",
+            CONF_FORECAST_DEVICE_TOKEN: "trial-token",
+        },
+        entry_id="unauthorized-entry",
+    )
+    entry.add_to_hass(hass)
+    hass.states.async_set(entry_data[CONF_BATTERY_CAPACITY_SENSOR], "53")
+
+    aioclient_mock.get(
+        (
+            "https://example.com/api/Forecast_Get?code=test-code"
+            "&currentBatteryCapacity=53&hash=&registrationData="
+        ),
+        status=401,
+        json={},
+    )
+
+    with patch("custom_components.mesh_solar._ensure_local_docs", AsyncMock()):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    diagnostics_state = hass.states.get("sensor.mesh_solar_forecast_diagnostics")
+    assert diagnostics_state is not None
+    assert diagnostics_state.state == "0"
+    assert diagnostics_state.attributes["authorization_status"] == "unauthorized"
+    assert diagnostics_state.attributes["authorization_status_code"] == 401
+
+    trial_state = hass.states.get("sensor.mesh_solar_trial_status")
+    assert trial_state is not None
+    assert trial_state.state == "unauthorized"
+    assert trial_state.attributes["authorization_status"] == "unauthorized"
+    assert trial_state.attributes["authorization_status_code"] == 401
 
 
 async def test_async_setup_entry_raises_for_missing_required_values(hass) -> None:
