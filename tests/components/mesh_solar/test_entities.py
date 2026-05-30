@@ -164,6 +164,52 @@ def test_forecast_detail_sensor_uses_forecast_payload() -> None:
     assert set(attrs) == {"environment", "period_count", "forecast", "registration"}
 
 
+def test_forecast_detail_sensor_redacts_trial_binding_values() -> None:
+    """Diagnostic attributes do not expose trial device tokens."""
+    token = "portal-trial-token"
+    device_id = "gx-device-1"
+    coordinator = _build_coordinator(
+        data=MeshSolarSnapshot(
+            forecast={
+                "forecast_device_token": token,
+                "nested": {"trialDeviceToken": token},
+                "periods": [
+                    {
+                        "period": 1,
+                        "deviceId": device_id,
+                        "trialDeviceToken": token,
+                    }
+                ],
+            },
+            forecast_periods=[
+                {
+                    "period": 1,
+                    "deviceId": device_id,
+                    "trialDeviceToken": token,
+                }
+            ],
+            registration={
+                "id": "registration-7",
+                "deviceId": device_id,
+                "trialDeviceToken": token,
+            },
+        )
+    )
+
+    entity = ForecastDetailSensor(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
+    attrs = entity.extra_state_attributes
+
+    assert token not in repr(attrs)
+    assert device_id not in repr(attrs)
+    assert attrs["forecast"]["forecast_device_token"] == "REDACTED"
+    assert attrs["forecast"]["nested"]["trialDeviceToken"] == "REDACTED"
+    assert attrs["forecast"]["periods"][0]["deviceId"] == "REDACTED"
+    assert attrs["forecast"]["periods"][0]["trialDeviceToken"] == "REDACTED"
+    assert attrs["registration"]["id"] == "registration-7"
+    assert attrs["registration"]["deviceId"] == "REDACTED"
+    assert attrs["registration"]["trialDeviceToken"] == "REDACTED"
+
+
 def test_bms_sensor_uses_current_period_when_forecast_state_missing(monkeypatch) -> None:
     """BMS state falls back to the active period."""
     now = dt_util.parse_datetime("2026-03-07T10:15:00+00:00")

@@ -14,6 +14,9 @@ from ..entity_helpers import (
     normalized_environment,
 )
 
+_REDACTED = "REDACTED"
+_SENSITIVE_KEY_PARTS = ("password", "secret", "token")
+
 
 class ForecastDetailSensor(MeshSolarEntity, SensorEntity):
     """Expose normalized forecast detail for diagnostics."""
@@ -54,7 +57,7 @@ class ForecastDetailSensor(MeshSolarEntity, SensorEntity):
         ]
         attrs["period_count"] = len(periods_payload)
 
-        forecast = deepcopy(snapshot.forecast)
+        forecast = _diagnostics_safe_payload(snapshot.forecast)
         if forecast:
             if periods_payload:
                 forecast["periods"] = periods_payload
@@ -69,7 +72,7 @@ class ForecastDetailSensor(MeshSolarEntity, SensorEntity):
                     ]
             attrs["forecast"] = forecast
         if snapshot.registration:
-            attrs["registration"] = deepcopy(snapshot.registration)
+            attrs["registration"] = _diagnostics_safe_payload(snapshot.registration)
 
         return attrs
 
@@ -77,7 +80,38 @@ class ForecastDetailSensor(MeshSolarEntity, SensorEntity):
 def _period_diagnostics_payload(period: Mapping[str, object]) -> dict[str, object]:
     """Return the diagnostics-safe period payload without history details."""
     return {
-        key: value
+        key: _diagnostics_safe_value(key, value)
         for key, value in period.items()
         if str(key).lower() != "history"
     }
+
+
+def _diagnostics_safe_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    """Return a diagnostics payload with sensitive trial binding values redacted."""
+    return {
+        key: _diagnostics_safe_value(key, value)
+        for key, value in payload.items()
+    }
+
+
+def _diagnostics_safe_value(key: object, value: object) -> object:
+    if _is_sensitive_diagnostics_key(str(key)):
+        return _REDACTED
+    return _diagnostics_safe_object(value)
+
+
+def _diagnostics_safe_object(value: object) -> object:
+    if isinstance(value, Mapping):
+        return _diagnostics_safe_payload(value)
+    if isinstance(value, list):
+        return [_diagnostics_safe_object(item) for item in value]
+    return deepcopy(value)
+
+
+def _is_sensitive_diagnostics_key(key: str) -> bool:
+    normalized = key.replace("-", "_").lower()
+    if any(part in normalized for part in _SENSITIVE_KEY_PARTS):
+        return True
+
+    collapsed = normalized.replace("_", "")
+    return collapsed.endswith("deviceid")

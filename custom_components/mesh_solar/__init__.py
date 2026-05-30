@@ -13,6 +13,8 @@ from .const import (
     CONF_API_KEY,
     CONF_BATTERY_CAPACITY_SENSOR,
     CONF_ENVIRONMENT,
+    CONF_FORECAST_DEVICE_ID,
+    CONF_FORECAST_DEVICE_TOKEN,
     CONF_HASH,
     CONF_REGISTRATION_DATA,
     CONF_URL,
@@ -45,6 +47,8 @@ _ENTRY_KEYS = (
     CONF_ENVIRONMENT,
     CONF_HASH,
     CONF_REGISTRATION_DATA,
+    CONF_FORECAST_DEVICE_ID,
+    CONF_FORECAST_DEVICE_TOKEN,
 )
 
 
@@ -112,6 +116,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         api_key=config_data[CONF_API_KEY],
         battery_capacity_sensor=config_data[CONF_BATTERY_CAPACITY_SENSOR],
         environment=config_data[CONF_ENVIRONMENT],
+        forecast_device_id=config_data[CONF_FORECAST_DEVICE_ID],
+        forecast_device_token=config_data[CONF_FORECAST_DEVICE_TOKEN],
         initial_hash=config_data[CONF_HASH],
         initial_registration=config_data[CONF_REGISTRATION_DATA],
     )

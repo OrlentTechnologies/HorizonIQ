@@ -13,6 +13,8 @@ class MeshSolarConfigData(TypedDict):
     environment: str
     hash: str
     registration_data: str
+    forecast_device_id: str
+    forecast_device_token: str
 
 
 class ForecastPeriod(TypedDict, total=False):

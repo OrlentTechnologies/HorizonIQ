@@ -5,12 +5,17 @@ from urllib.parse import urlparse
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import selector
 import voluptuous as vol
 
 from .const import (
     CONF_API_KEY,
     CONF_BATTERY_CAPACITY_SENSOR,
     CONF_ENVIRONMENT,
+    CONF_FORECAST_DEVICE_ID,
+    CONF_FORECAST_DEVICE_TOKEN,
+    CONF_GX_DEVICE_ID,
+    CONF_HOME_ASSISTANT_INSTALLATION_ID,
     CONF_HASH,
     CONF_REGISTRATION_DATA,
     CONF_URL,
@@ -24,6 +29,12 @@ from .const import (
 from .models import MeshSolarConfigData
 
 _MISSING: Final = object()
+_PASSWORD_SELECTOR = selector.TextSelector(
+    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+)
+_READ_ONLY_TEXT_SELECTOR = selector.TextSelector(
+    selector.TextSelectorConfig(read_only=True)
+)
 
 
 def default_config_data() -> MeshSolarConfigData:
@@ -35,6 +46,8 @@ def default_config_data() -> MeshSolarConfigData:
         environment=DEFAULT_ENVIRONMENT_LABEL,
         hash="",
         registration_data="",
+        forecast_device_id="",
+        forecast_device_token="",
     )
 
 
@@ -49,12 +62,19 @@ def normalize_config_input(user_input: Mapping[str, object]) -> MeshSolarConfigD
         environment=normalize_environment(_string_value(user_input.get(CONF_ENVIRONMENT))),
         hash=_string_value(user_input.get(CONF_HASH)),
         registration_data=_string_value(user_input.get(CONF_REGISTRATION_DATA)),
+        forecast_device_id=_strip_text(_configured_device_id_value(user_input)),
+        forecast_device_token=_strip_text(user_input.get(CONF_FORECAST_DEVICE_TOKEN)),
     )
 
 
 def merged_config_data(entry: ConfigEntry) -> MeshSolarConfigData:
     """Merge config entry data and options into one normalized structure."""
     defaults = default_config_data()
+    default_device_id = _entry_value(
+        entry,
+        CONF_GX_DEVICE_ID,
+        defaults[CONF_FORECAST_DEVICE_ID],
+    )
     return normalize_config_input(
         {
             CONF_URL: _entry_value(entry, CONF_URL, defaults[CONF_URL]),
@@ -69,6 +89,12 @@ def merged_config_data(entry: ConfigEntry) -> MeshSolarConfigData:
             ),
             CONF_HASH: _entry_value(entry, CONF_HASH, ""),
             CONF_REGISTRATION_DATA: _entry_value(entry, CONF_REGISTRATION_DATA, ""),
+            CONF_FORECAST_DEVICE_ID: _entry_value(
+                entry, CONF_FORECAST_DEVICE_ID, default_device_id
+            ),
+            CONF_FORECAST_DEVICE_TOKEN: _entry_value(
+                entry, CONF_FORECAST_DEVICE_TOKEN, ""
+            ),
         }
     )
 
@@ -97,10 +123,18 @@ def validate_config_data(config_data: MeshSolarConfigData) -> dict[str, str]:
     return errors
 
 
-def build_config_schema(*, config_data: MeshSolarConfigData) -> vol.Schema:
+def build_config_schema(
+    *,
+    config_data: MeshSolarConfigData,
+    installation_id: str,
+) -> vol.Schema:
     """Build the config flow schema."""
     return vol.Schema(
         {
+            vol.Optional(
+                CONF_HOME_ASSISTANT_INSTALLATION_ID,
+                default=installation_id,
+            ): _READ_ONLY_TEXT_SELECTOR,
             vol.Required(CONF_URL, default=config_data[CONF_URL]): str,
             vol.Required(CONF_API_KEY, default=config_data[CONF_API_KEY]): str,
             vol.Required(
@@ -116,6 +150,14 @@ def build_config_schema(*, config_data: MeshSolarConfigData) -> vol.Schema:
                 CONF_REGISTRATION_DATA,
                 default=config_data[CONF_REGISTRATION_DATA],
             ): str,
+            vol.Optional(
+                CONF_FORECAST_DEVICE_ID,
+                default=config_data[CONF_FORECAST_DEVICE_ID],
+            ): str,
+            vol.Optional(
+                CONF_FORECAST_DEVICE_TOKEN,
+                default=config_data[CONF_FORECAST_DEVICE_TOKEN],
+            ): _PASSWORD_SELECTOR,
         }
     )
 
@@ -130,6 +172,13 @@ def _entry_value(entry: ConfigEntry, key: str, default: object) -> object:
         return value
 
     return default
+
+
+def _configured_device_id_value(user_input: Mapping[str, object]) -> object:
+    value = user_input.get(CONF_FORECAST_DEVICE_ID, _MISSING)
+    if value is not _MISSING:
+        return value
+    return user_input.get(CONF_GX_DEVICE_ID)
 
 
 def _environment_for_form(value: str) -> str:

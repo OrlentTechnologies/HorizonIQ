@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry, ConfigFlowResult
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import instance_id
 
 from .config_data import (
     build_config_schema,
@@ -11,7 +14,13 @@ from .config_data import (
     normalize_config_input,
     validate_config_data,
 )
-from .const import DEFAULT_TITLE, DOMAIN
+from .const import (
+    DEFAULT_TITLE,
+    DOMAIN,
+    UNAVAILABLE_HOME_ASSISTANT_INSTALLATION_ID,
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class MeshSolarConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -36,7 +45,10 @@ class MeshSolarConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user",
-            data_schema=build_config_schema(config_data=config_data),
+            data_schema=build_config_schema(
+                config_data=config_data,
+                installation_id=await _async_installation_id(self.hass),
+            ),
             errors=errors,
         )
 
@@ -74,6 +86,18 @@ class MeshSolarOptionsFlow(config_entries.OptionsFlow):
 
         return self.async_show_form(
             step_id="init",
-            data_schema=build_config_schema(config_data=config_data),
+            data_schema=build_config_schema(
+                config_data=config_data,
+                installation_id=await _async_installation_id(self.hass),
+            ),
             errors=errors,
         )
+
+
+async def _async_installation_id(hass: HomeAssistant) -> str:
+    """Return the Home Assistant installation ID for display in config flows."""
+    try:
+        return await instance_id.async_get(hass)
+    except Exception:
+        _LOGGER.warning("Unable to read Home Assistant installation ID", exc_info=True)
+        return UNAVAILABLE_HOME_ASSISTANT_INSTALLATION_ID

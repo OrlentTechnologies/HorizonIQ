@@ -13,6 +13,9 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
+    HEADER_API_KEY,
+    HEADER_MESH_DEVICE_ID,
+    HEADER_MESH_DEVICE_TOKEN,
     CONF_HASH,
     CONF_REGISTRATION_DATA,
     DEFAULT_FORECAST_CADENCE_MINUTES,
@@ -41,6 +44,8 @@ class MeshSolarCoordinator(DataUpdateCoordinator[MeshSolarSnapshot]):
         api_key: str,
         battery_capacity_sensor: str,
         environment: str,
+        forecast_device_id: str = "",
+        forecast_device_token: str = "",
         initial_hash: str | None = None,
         initial_registration: str | None = None,
     ) -> None:
@@ -48,6 +53,8 @@ class MeshSolarCoordinator(DataUpdateCoordinator[MeshSolarSnapshot]):
         self._entry = entry
         self._url = url
         self._api_key = api_key
+        self._forecast_device_id = forecast_device_id.strip()
+        self._forecast_device_token = forecast_device_token.strip()
         self._battery_capacity_sensor = battery_capacity_sensor
         self._session = async_get_clientsession(hass)
         self._last_hash = (initial_hash or "").strip()
@@ -63,6 +70,7 @@ class MeshSolarCoordinator(DataUpdateCoordinator[MeshSolarSnapshot]):
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=entry,
             name=DOMAIN,
             update_interval=timedelta(minutes=self._effective_forecast_cadence_minutes),
         )
@@ -170,7 +178,7 @@ class MeshSolarCoordinator(DataUpdateCoordinator[MeshSolarSnapshot]):
             )
 
     async def _fetch_payload(self, *, request_url: str) -> dict[str, object]:
-        headers = {"X-API-KEY": self._api_key}
+        headers = self._build_request_headers()
         try:
             async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
                 async with self._session.get(request_url, headers=headers) as response:
@@ -187,6 +195,15 @@ class MeshSolarCoordinator(DataUpdateCoordinator[MeshSolarSnapshot]):
         if not isinstance(payload, dict):
             raise UpdateFailed("Mesh Solar API returned an unexpected payload shape")
         return payload
+
+    def _build_request_headers(self) -> dict[str, str]:
+        """Build forecast request headers without exposing trial data in the URL."""
+        headers = {HEADER_API_KEY: self._api_key}
+        if self._forecast_device_id:
+            headers[HEADER_MESH_DEVICE_ID] = self._forecast_device_id
+        if self._forecast_device_token:
+            headers[HEADER_MESH_DEVICE_TOKEN] = self._forecast_device_token
+        return headers
 
     def _current_battery_capacity(self) -> str:
         battery_state = self._hass.states.get(self._battery_capacity_sensor)

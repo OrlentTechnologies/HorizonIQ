@@ -41,12 +41,15 @@ These are available in `Add Integration` and in `Configure` for existing entries
 
 | Field | Required | Description |
 |---|---|---|
+| `home_assistant_installation_id` | Read-only | Stable Home Assistant installation identifier from `core.uuid`, shown for copying when registering licensing or trials. Not stored by this integration. |
 | `url` | Yes | Forecast API endpoint URL. |
 | `api_key` | Yes | Value sent in `X-API-KEY` request header. |
 | `battery_capacity_sensor` | Yes | Entity ID whose state is sent as `currentBatteryCapacity` query value. |
 | `environment` | No | `Live` or `Sandbox`. `Live` is stored internally as an empty value. |
 | `hash` | No | Deterministic result of the most recent forecast, sent as the `hash` query value. Usually managed automatically. |
 | `registration_data` | No | Registration data for your site, sent as `registrationData` so it is not constantly reloaded from the database. It refreshes daily or when you force refresh with the button. |
+| `forecast_device_id` | No | Canonical device ID for app-owned trial binding, sent as `X-Mesh-Device-Id` when set. Victron/Home Assistant setups usually use the GX device ID. |
+| `forecast_device_token` | No | Portal-generated app trial device token, sent as `X-Mesh-Device-Token` when set. |
 
 ## Entities Created
 
@@ -86,6 +89,8 @@ Behavior:
 
 The integration stores values in Home Assistant config entry storage (`.storage/core.config_entries`).
 
+The Home Assistant Installation ID shown in the config/options flow is read from Home Assistant's own `core.uuid` storage and is displayed only as read-only metadata.
+
 ### Persisted (entry data)
 
 | Key | How It Is Used | How It Changes |
@@ -96,6 +101,8 @@ The integration stores values in Home Assistant config entry storage (`.storage/
 | `environment` | Labels entities and keeps environment mode. | Set by user in config/options flow. |
 | `hash` | Deterministic result of the most recent forecast, sent as `hash`. | Updated from API response (`hash`/variants). |
 | `registration_data` | Site registration data sent as `registrationData` to avoid constant database reloads. | Refreshed daily by upstream behavior, editable in options, and force-refreshable via button. |
+| `forecast_device_id` | Optional device binding header `X-Mesh-Device-Id` for app-owned trials. | Set by user in config/options flow. Defaults from `gx_device_id` on legacy/external entries when present. |
+| `forecast_device_token` | Optional device binding header `X-Mesh-Device-Token` for app-owned trials. | Set by user in config/options flow. |
 
 ### Runtime-only (not persisted)
 
@@ -111,6 +118,12 @@ Each poll includes:
 - `currentBatteryCapacity`
 - `hash`
 - `registrationData`
+
+App-owned trials can also send optional request headers:
+- `X-Mesh-Device-Id`
+- `X-Mesh-Device-Token`
+
+These values are never sent as query parameters. Paid subscriptions and Stripe/provider trialing subscriptions can leave them empty.
 
 If API returns updated hash/registration data, the integration persists them automatically.
 

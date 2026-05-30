@@ -11,20 +11,26 @@
         "title": "Mesh Solar",
         "description": "Configure your Mesh Solar API connection.",
         "data": {
+          "home_assistant_installation_id": "Home Assistant Installation ID",
           "url": "Forecast URL",
           "api_key": "API key",
           "battery_capacity_sensor": "Battery capacity sensor",
           "environment": "Environment",
           "hash": "Forecast hash",
-          "registration_data": "Registration data"
+          "registration_data": "Registration data",
+          "forecast_device_id": "Forecast device ID",
+          "forecast_device_token": "Forecast device token"
         },
         "data_description": {
+          "home_assistant_installation_id": "Read-only identifier for this Home Assistant installation. Copy this value when registering licensing or trials.",
           "url": "Forecast endpoint URL.",
           "api_key": "API key sent as X-API-KEY.",
           "battery_capacity_sensor": "Entity ID that provides current battery capacity.",
           "environment": "Use Live or Sandbox.",
           "hash": "Deterministic result of the most recent forecast.",
-          "registration_data": "Registration data for your site. Used to avoid constant database reloads. Refreshes daily or when force-refreshed by the clear registration button."
+          "registration_data": "Registration data for your site. Used to avoid constant database reloads. Refreshes daily or when force-refreshed by the clear registration button.",
+          "forecast_device_id": "Optional canonical device ID for app trial binding. Victron/Home Assistant setups usually use the GX device ID.",
+          "forecast_device_token": "Optional portal-generated trial device token. Sent only as X-Mesh-Device-Token."
         }
       }
     }
@@ -40,20 +46,26 @@
         "title": "Mesh Solar settings",
         "description": "Edit Mesh Solar connection values and cached tokens.",
         "data": {
+          "home_assistant_installation_id": "Home Assistant Installation ID",
           "url": "Forecast URL",
           "api_key": "API key",
           "battery_capacity_sensor": "Battery capacity sensor",
           "environment": "Environment",
           "hash": "Forecast hash",
-          "registration_data": "Registration data"
+          "registration_data": "Registration data",
+          "forecast_device_id": "Forecast device ID",
+          "forecast_device_token": "Forecast device token"
         },
         "data_description": {
+          "home_assistant_installation_id": "Read-only identifier for this Home Assistant installation. Copy this value when registering licensing or trials.",
           "url": "Forecast endpoint URL.",
           "api_key": "API key sent as X-API-KEY.",
           "battery_capacity_sensor": "Entity ID that provides current battery capacity.",
           "environment": "Use Live or Sandbox.",
           "hash": "Deterministic result of the most recent forecast.",
-          "registration_data": "Registration data for your site. Used to avoid constant database reloads. Refreshes daily or when force-refreshed by the clear registration button."
+          "registration_data": "Registration data for your site. Used to avoid constant database reloads. Refreshes daily or when force-refreshed by the clear registration button.",
+          "forecast_device_id": "Optional canonical device ID for app trial binding. Victron/Home Assistant setups usually use the GX device ID.",
+          "forecast_device_token": "Optional portal-generated trial device token. Sent only as X-Mesh-Device-Token."
         }
       }
     }

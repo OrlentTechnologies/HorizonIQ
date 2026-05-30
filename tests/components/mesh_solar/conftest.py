@@ -7,6 +7,8 @@ from custom_components.mesh_solar.const import (
     CONF_API_KEY,
     CONF_BATTERY_CAPACITY_SENSOR,
     CONF_ENVIRONMENT,
+    CONF_FORECAST_DEVICE_ID,
+    CONF_FORECAST_DEVICE_TOKEN,
     CONF_HASH,
     CONF_REGISTRATION_DATA,
     CONF_URL,
@@ -29,6 +31,8 @@ def entry_data_fixture() -> dict[str, str]:
         CONF_ENVIRONMENT: "",
         CONF_HASH: "",
         CONF_REGISTRATION_DATA: "",
+        CONF_FORECAST_DEVICE_ID: "",
+        CONF_FORECAST_DEVICE_TOKEN: "",
     }
 
 

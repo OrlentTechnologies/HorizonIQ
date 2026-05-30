@@ -13,6 +13,8 @@ from custom_components.mesh_solar.const import (
     CONF_API_KEY,
     CONF_BATTERY_CAPACITY_SENSOR,
     CONF_ENVIRONMENT,
+    CONF_FORECAST_DEVICE_ID,
+    CONF_FORECAST_DEVICE_TOKEN,
     CONF_HASH,
     CONF_REGISTRATION_DATA,
     CONF_URL,
@@ -56,6 +58,8 @@ async def test_async_setup_entry_creates_coordinator_and_forwards_platforms(
         api_key=entry_data[CONF_API_KEY],
         battery_capacity_sensor=entry_data[CONF_BATTERY_CAPACITY_SENSOR],
         environment=DEFAULT_ENVIRONMENT,
+        forecast_device_id="",
+        forecast_device_token="",
         initial_hash="",
         initial_registration="",
     )
@@ -218,6 +222,8 @@ async def test_async_setup_entry_raises_for_missing_required_values(hass) -> Non
             CONF_ENVIRONMENT: DEFAULT_ENVIRONMENT,
             CONF_HASH: "",
             CONF_REGISTRATION_DATA: "",
+            CONF_FORECAST_DEVICE_ID: "",
+            CONF_FORECAST_DEVICE_TOKEN: "",
         },
         entry_id="missing-url",
     )
