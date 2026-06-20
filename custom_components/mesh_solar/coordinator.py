@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import timedelta
 from http import HTTPStatus
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -10,19 +10,30 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from aiohttp import ClientError, ClientResponse, ContentTypeError
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
+    CONF_API_KEY,
+    CONF_FORECAST_DEVICE_ID,
+    CONF_FORECAST_DEVICE_TOKEN,
+    CONF_FORECAST_FUNCTION_KEY,
+    CONF_HASH,
+    CONF_REGISTRATION_DATA,
+    CONF_SUBSCRIPTION_STATUS,
+    CONF_URL,
+    DEFAULT_FORECAST_CADENCE_MINUTES,
+    DOMAIN,
+    EXACT_SUBSCRIPTION_FAILURE_BODY,
+    FAILED_REFRESH_RETRY_SECONDS,
     HEADER_API_KEY,
     HEADER_MESH_DEVICE_ID,
     HEADER_MESH_DEVICE_TOKEN,
-    CONF_HASH,
-    CONF_REGISTRATION_DATA,
-    DEFAULT_FORECAST_CADENCE_MINUTES,
-    DOMAIN,
-    FAILED_REFRESH_RETRY_SECONDS,
+    ISSUE_ENTITLEMENT_LOST,
+    ISSUE_FORECAST_CREDENTIAL_REFRESH,
     REQUEST_TIMEOUT_SECONDS,
+    SUBSCRIPTION_STATUS_NO_SUBSCRIPTION,
     normalize_environment,
 )
 from .coordinator_helpers import (
@@ -48,8 +59,10 @@ class MeshSolarCoordinator(DataUpdateCoordinator[MeshSolarSnapshot]):
         environment: str,
         forecast_device_id: str = "",
         forecast_device_token: str = "",
+        forecast_function_key: str = "",
         initial_hash: str | None = None,
         initial_registration: str | None = None,
+        credential_refresh: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         self._hass = hass
         self._entry = entry
@@ -57,10 +70,12 @@ class MeshSolarCoordinator(DataUpdateCoordinator[MeshSolarSnapshot]):
         self._api_key = api_key
         self._forecast_device_id = forecast_device_id.strip()
         self._forecast_device_token = forecast_device_token.strip()
+        self._forecast_function_key = forecast_function_key.strip()
         self._battery_capacity_sensor = battery_capacity_sensor
         self._session = async_get_clientsession(hass)
         self._last_hash = (initial_hash or "").strip()
         self._registration_data = (initial_registration or "").strip()
+        self._credential_refresh = credential_refresh
         self._forecast_cadence_minutes = extract_forecast_cadence_minutes_from_registration_data(
             self._registration_data
         )
@@ -128,8 +143,13 @@ class MeshSolarCoordinator(DataUpdateCoordinator[MeshSolarSnapshot]):
         )
 
         try:
-            payload = await self._fetch_payload(request_url=request_url)
+            payload = await self._fetch_payload(
+                request_url=request_url,
+                battery_capacity=battery_capacity,
+            )
         except UpdateFailed as err:
+            if str(err) == EXACT_SUBSCRIPTION_FAILURE_BODY:
+                raise
             raise UpdateFailed(
                 str(err),
                 retry_after=FAILED_REFRESH_RETRY_SECONDS,
@@ -179,13 +199,49 @@ class MeshSolarCoordinator(DataUpdateCoordinator[MeshSolarSnapshot]):
                 err,
             )
 
-    async def _fetch_payload(self, *, request_url: str) -> dict[str, object]:
+    async def _fetch_payload(
+        self,
+        *,
+        request_url: str,
+        battery_capacity: str,
+        allow_credential_refresh: bool = True,
+    ) -> dict[str, object]:
         headers = self._build_request_headers()
         try:
             async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
                 async with self._session.get(request_url, headers=headers) as response:
                     if response.status != HTTPStatus.OK:
-                        if response.status == HTTPStatus.UNAUTHORIZED:
+                        if response.status == HTTPStatus.BAD_REQUEST:
+                            body = (await response.text()).strip()
+                            if body == EXACT_SUBSCRIPTION_FAILURE_BODY:
+                                self._handle_subscription_loss()
+                                raise UpdateFailed(EXACT_SUBSCRIPTION_FAILURE_BODY)
+                        if response.status in {
+                            HTTPStatus.UNAUTHORIZED,
+                            HTTPStatus.FORBIDDEN,
+                        }:
+                            if (
+                                allow_credential_refresh
+                                and self._credential_refresh is not None
+                                and await self._async_refresh_forecast_credentials()
+                            ):
+                                retry_url = self._build_request_url(battery_capacity)
+                                _LOGGER.info(
+                                    "Retrying Mesh Solar forecast for entry %s after credential refresh",
+                                    self._entry.entry_id,
+                                )
+                                return await self._fetch_payload(
+                                    request_url=retry_url,
+                                    battery_capacity=battery_capacity,
+                                    allow_credential_refresh=False,
+                                )
+
+                            if self._credential_refresh is not None:
+                                self._handle_forecast_credential_refresh_failed()
+                                raise UpdateFailed(
+                                    "Forecast credentials could not be refreshed"
+                                )
+
                             payload = await self._read_optional_json_payload(response)
                             _LOGGER.info(
                                 "Mesh Solar API returned unauthorized forecast "
@@ -206,6 +262,43 @@ class MeshSolarCoordinator(DataUpdateCoordinator[MeshSolarSnapshot]):
         if not isinstance(payload, dict):
             raise UpdateFailed("Mesh Solar API returned an unexpected payload shape")
         return payload
+
+    async def _async_refresh_forecast_credentials(self) -> bool:
+        if self._credential_refresh is None:
+            return False
+
+        try:
+            refreshed = await self._credential_refresh()
+        except Exception:
+            _LOGGER.warning(
+                "Mesh Solar forecast credential refresh failed for entry %s",
+                self._entry.entry_id,
+                exc_info=True,
+            )
+            return False
+
+        if not refreshed:
+            return False
+
+        self._reload_forecast_credentials_from_entry()
+        return True
+
+    def _reload_forecast_credentials_from_entry(self) -> None:
+        entry_data = self._entry.data
+        self._url = str(entry_data.get(CONF_URL, self._url) or self._url)
+        self._api_key = str(entry_data.get(CONF_API_KEY, self._api_key) or self._api_key)
+        self._forecast_device_id = str(
+            entry_data.get(CONF_FORECAST_DEVICE_ID, self._forecast_device_id)
+            or ""
+        ).strip()
+        self._forecast_device_token = str(
+            entry_data.get(CONF_FORECAST_DEVICE_TOKEN, self._forecast_device_token)
+            or ""
+        ).strip()
+        self._forecast_function_key = str(
+            entry_data.get(CONF_FORECAST_FUNCTION_KEY, self._forecast_function_key)
+            or ""
+        ).strip()
 
     @staticmethod
     def _authorization_diagnostic_payload(
@@ -254,9 +347,8 @@ class MeshSolarCoordinator(DataUpdateCoordinator[MeshSolarSnapshot]):
     def _build_request_headers(self) -> dict[str, str]:
         """Build forecast request headers without exposing trial data in the URL."""
         headers = {HEADER_API_KEY: self._api_key}
-        if self._forecast_device_id:
+        if self._forecast_device_id and self._forecast_device_token:
             headers[HEADER_MESH_DEVICE_ID] = self._forecast_device_id
-        if self._forecast_device_token:
             headers[HEADER_MESH_DEVICE_TOKEN] = self._forecast_device_token
         return headers
 
@@ -274,6 +366,8 @@ class MeshSolarCoordinator(DataUpdateCoordinator[MeshSolarSnapshot]):
     def _build_request_url(self, battery_capacity: str) -> str:
         parsed = urlparse(self._url)
         query_params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        if self._forecast_function_key:
+            query_params["code"] = self._forecast_function_key
         query_params["currentBatteryCapacity"] = battery_capacity
         query_params["hash"] = self._last_hash
         query_params["registrationData"] = self._registration_data
@@ -321,6 +415,40 @@ class MeshSolarCoordinator(DataUpdateCoordinator[MeshSolarSnapshot]):
 
         if updated:
             self._hass.config_entries.async_update_entry(self._entry, data=entry_data)
+
+    def _handle_subscription_loss(self) -> None:
+        """Persist terminal entitlement loss and pause normal polling."""
+        self._last_hash = ""
+        self._registration_data = ""
+        self.update_interval = None
+
+        entry_data = dict(self._entry.data)
+        entry_data[CONF_HASH] = ""
+        entry_data[CONF_REGISTRATION_DATA] = ""
+        entry_data[CONF_SUBSCRIPTION_STATUS] = SUBSCRIPTION_STATUS_NO_SUBSCRIPTION
+        self._hass.config_entries.async_update_entry(self._entry, data=entry_data)
+
+        ir.async_create_issue(
+            self._hass,
+            DOMAIN,
+            ISSUE_ENTITLEMENT_LOST,
+            is_fixable=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key=ISSUE_ENTITLEMENT_LOST,
+            translation_placeholders={"subscribe_url": ""},
+        )
+
+    def _handle_forecast_credential_refresh_failed(self) -> None:
+        """Pause polling after a failed function-key refresh attempt."""
+        self.update_interval = None
+        ir.async_create_issue(
+            self._hass,
+            DOMAIN,
+            ISSUE_FORECAST_CREDENTIAL_REFRESH,
+            is_fixable=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key=ISSUE_FORECAST_CREDENTIAL_REFRESH,
+        )
 
     def _set_forecast_cadence_minutes(self, cadence_minutes: int | None) -> None:
         previous_effective = self._effective_forecast_cadence_minutes

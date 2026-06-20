@@ -169,16 +169,25 @@ def test_forecast_detail_sensor_redacts_trial_binding_values() -> None:
     """Diagnostic attributes do not expose trial device tokens."""
     token = "portal-trial-token"
     device_id = "gx-device-1"
+    function_key = "forecast-function-key"
+    registration_data = "encrypted-registration-data"
     coordinator = _build_coordinator(
         data=MeshSolarSnapshot(
             forecast={
                 "forecast_device_token": token,
+                "forecast_function_key": function_key,
+                "registration_data": registration_data,
+                "endpoint": (
+                    "https://api.mesh-forecaster.com/api/Forecast_Get"
+                    "?code=forecast-function-key&currentBatteryCapacity=50"
+                ),
                 "nested": {"trialDeviceToken": token},
                 "periods": [
                     {
                         "period": 1,
                         "deviceId": device_id,
                         "trialDeviceToken": token,
+                        "registrationData": registration_data,
                     }
                 ],
             },
@@ -187,6 +196,7 @@ def test_forecast_detail_sensor_redacts_trial_binding_values() -> None:
                     "period": 1,
                     "deviceId": device_id,
                     "trialDeviceToken": token,
+                    "registrationData": registration_data,
                 }
             ],
             registration={
@@ -202,10 +212,19 @@ def test_forecast_detail_sensor_redacts_trial_binding_values() -> None:
 
     assert token not in repr(attrs)
     assert device_id not in repr(attrs)
+    assert function_key not in repr(attrs)
+    assert registration_data not in repr(attrs)
     assert attrs["forecast"]["forecast_device_token"] == "REDACTED"
+    assert attrs["forecast"]["forecast_function_key"] == "REDACTED"
+    assert attrs["forecast"]["registration_data"] == "REDACTED"
+    assert attrs["forecast"]["endpoint"] == (
+        "https://api.mesh-forecaster.com/api/Forecast_Get"
+        "?code=REDACTED&currentBatteryCapacity=50"
+    )
     assert attrs["forecast"]["nested"]["trialDeviceToken"] == "REDACTED"
     assert attrs["forecast"]["periods"][0]["deviceId"] == "REDACTED"
     assert attrs["forecast"]["periods"][0]["trialDeviceToken"] == "REDACTED"
+    assert attrs["forecast"]["periods"][0]["registrationData"] == "REDACTED"
     assert attrs["registration"]["id"] == "registration-7"
     assert attrs["registration"]["deviceId"] == "REDACTED"
     assert attrs["registration"]["trialDeviceToken"] == "REDACTED"
@@ -456,3 +475,45 @@ def test_default_environment_unique_ids_include_entry_id() -> None:
 
     trial = TrialStatusSensor(coordinator, "entry-1", DEFAULT_ENVIRONMENT)
     assert trial.unique_id == "mesh_solar_entry-1_trial_status"
+
+
+def test_default_environment_names_remain_unchanged() -> None:
+    """Live/default entity names remain unchanged."""
+    coordinator = _build_coordinator()
+
+    sensor = MonetarySensor(
+        coordinator,
+        "entry-1",
+        DEFAULT_ENVIRONMENT,
+        name_suffix="Total Cost",
+        unique_suffix="total_cost",
+        value_field="total_cost",
+    )
+    cadence = ForecastCadenceSensor(coordinator, "entry-1", DEFAULT_ENVIRONMENT)
+    button = ClearRegistrationButton(coordinator, "entry-1", DEFAULT_ENVIRONMENT)
+
+    assert sensor.name == "Mesh Solar Total Cost"
+    assert cadence.name == "Mesh Solar Forecast Cadence"
+    assert button.name == "Mesh Solar Clear Registration"
+
+
+def test_sandbox_environment_names_are_prefixed() -> None:
+    """Sandbox entity names are distinct from Live names."""
+    coordinator = _build_coordinator()
+
+    sensor = MonetarySensor(
+        coordinator,
+        "entry-1",
+        SANDBOX_ENVIRONMENT,
+        name_suffix="Total Cost",
+        unique_suffix="total_cost",
+        value_field="total_cost",
+    )
+    import_sensor = ImportSensor(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
+    cadence = ForecastCadenceSensor(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
+    button = ClearRegistrationButton(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
+
+    assert sensor.name == "Mesh Solar Sandbox Total Cost"
+    assert import_sensor.name == "Mesh Solar Sandbox Import"
+    assert cadence.name == "Mesh Solar Sandbox Forecast Cadence"
+    assert button.name == "Mesh Solar Sandbox Clear Registration"

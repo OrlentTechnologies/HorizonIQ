@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.helpers.entity import EntityCategory
@@ -9,13 +10,24 @@ from homeassistant.helpers.entity import EntityCategory
 from ..entity import MeshSolarEntity
 from ..entity_helpers import (
     build_unique_id,
-    display_suffix,
+    entity_name,
     environment_label,
     normalized_environment,
 )
 
 _REDACTED = "REDACTED"
-_SENSITIVE_KEY_PARTS = ("password", "secret", "token")
+_SENSITIVE_KEY_PARTS = ("password", "secret", "token", "function_key")
+_SENSITIVE_EXACT_KEYS = {
+    "api_key",
+    "apikey",
+    "code",
+    "forecastfunctionkey",
+    "forecast_function_key",
+    "registrationdata",
+    "registration_data",
+}
+_URL_KEY_PARTS = ("endpoint", "url")
+_SENSITIVE_QUERY_PARAMETERS = {"code"}
 
 
 class ForecastDetailSensor(MeshSolarEntity, SensorEntity):
@@ -26,9 +38,7 @@ class ForecastDetailSensor(MeshSolarEntity, SensorEntity):
     def __init__(self, coordinator, entry_id: str, environment: str) -> None:
         super().__init__(coordinator)
         self._environment = normalized_environment(environment)
-        self._attr_name = (
-            f"Mesh Solar Forecast Diagnostics{display_suffix(self._environment)}"
-        )
+        self._attr_name = entity_name(self._environment, "Forecast Diagnostics")
         self._attr_unique_id = build_unique_id(
             self._environment, entry_id, "forecast_diagnostics"
         )
@@ -107,8 +117,11 @@ def _diagnostics_safe_payload(payload: Mapping[str, object]) -> dict[str, object
 
 
 def _diagnostics_safe_value(key: object, value: object) -> object:
-    if _is_sensitive_diagnostics_key(str(key)):
+    key_text = str(key)
+    if _is_sensitive_diagnostics_key(key_text):
         return _REDACTED
+    if isinstance(value, str):
+        return _diagnostics_safe_string(key_text, value)
     return _diagnostics_safe_object(value)
 
 
@@ -122,8 +135,26 @@ def _diagnostics_safe_object(value: object) -> object:
 
 def _is_sensitive_diagnostics_key(key: str) -> bool:
     normalized = key.replace("-", "_").lower()
+    collapsed = normalized.replace("_", "")
+    if normalized in _SENSITIVE_EXACT_KEYS or collapsed in _SENSITIVE_EXACT_KEYS:
+        return True
     if any(part in normalized for part in _SENSITIVE_KEY_PARTS):
         return True
 
-    collapsed = normalized.replace("_", "")
     return collapsed.endswith("deviceid")
+
+
+def _diagnostics_safe_string(key: str, value: str) -> str:
+    normalized = key.replace("-", "_").lower()
+    if not any(part in normalized for part in _URL_KEY_PARTS):
+        return value
+
+    parsed = urlparse(value)
+    if not parsed.query:
+        return value
+
+    query = [
+        (name, _REDACTED if name.lower() in _SENSITIVE_QUERY_PARAMETERS else val)
+        for name, val in parse_qsl(parsed.query, keep_blank_values=True)
+    ]
+    return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))

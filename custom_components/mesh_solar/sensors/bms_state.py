@@ -9,7 +9,7 @@ from homeassistant.util import dt as dt_util
 from ..entity import MeshSolarEntity
 from ..entity_helpers import (
     build_unique_id,
-    display_suffix,
+    entity_name,
     environment_label,
     normalized_environment,
 )
@@ -24,7 +24,7 @@ class BatteryManagementSystemStateSensor(MeshSolarEntity, SensorEntity):
     def __init__(self, coordinator, entry_id: str, environment: str) -> None:
         super().__init__(coordinator)
         self._environment = normalized_environment(environment)
-        self._attr_name = f"Mesh Solar BMS State{display_suffix(self._environment)}"
+        self._attr_name = entity_name(self._environment, "BMS State")
         self._attr_unique_id = build_unique_id(
             self._environment, entry_id, "bms_state"
         )

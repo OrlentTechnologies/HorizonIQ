@@ -9,7 +9,7 @@ from ..const import DEFAULT_ENVIRONMENT, DOMAIN
 from ..entity import MeshSolarEntity
 from ..entity_helpers import (
     build_unique_id,
-    display_suffix,
+    entity_name,
     environment_label,
     normalized_environment,
 )
@@ -40,7 +40,7 @@ class ImportSensor(MeshSolarEntity, BinarySensorEntity):
     def __init__(self, coordinator, entry_id: str, environment: str) -> None:
         super().__init__(coordinator)
         self._environment = normalized_environment(environment)
-        self._attr_name = f"Mesh Solar Import{display_suffix(self._environment)}"
+        self._attr_name = entity_name(self._environment, "Import")
         self._attr_unique_id = build_unique_id(self._environment, entry_id, "import")
 
     @property
@@ -63,7 +63,7 @@ class ExportSensor(MeshSolarEntity, BinarySensorEntity):
     def __init__(self, coordinator, entry_id: str, environment: str) -> None:
         super().__init__(coordinator)
         self._environment = normalized_environment(environment)
-        self._attr_name = f"Mesh Solar Export{display_suffix(self._environment)}"
+        self._attr_name = entity_name(self._environment, "Export")
         self._attr_unique_id = build_unique_id(self._environment, entry_id, "export")
 
     @property

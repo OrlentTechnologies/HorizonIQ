@@ -28,6 +28,14 @@ def display_suffix(environment: str) -> str:
     return f" ({display_environment(normalized)})"
 
 
+def entity_name(environment: str, suffix: str) -> str:
+    """Return an entity name without changing default-environment names."""
+    normalized = normalized_environment(environment)
+    if normalized == DEFAULT_ENVIRONMENT:
+        return f"Mesh Solar {suffix}"
+    return f"Mesh Solar {display_environment(normalized)} {suffix}"
+
+
 def build_unique_id(environment: str, entry_id: str, suffix: str) -> str:
     """Build a per-entry unique ID."""
     normalized = normalized_environment(environment)

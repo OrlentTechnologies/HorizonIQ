@@ -1,32 +1,58 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import logging
 from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 
+from .api import (
+    MeshSolarApiAuthError,
+    MeshSolarApiError,
+    MeshSolarApiTransientError,
+    MeshSolarBootstrapClient,
+)
+from .bootstrap import BootstrapValidationError
 from .config_data import merged_config_data, validate_config_data
 from .const import (
     CONF_API_KEY,
     CONF_BATTERY_CAPACITY_SENSOR,
+    CONF_BOOTSTRAP_REFRESH_AFTER_UTC,
     CONF_ENVIRONMENT,
     CONF_FORECAST_DEVICE_ID,
     CONF_FORECAST_DEVICE_TOKEN,
+    CONF_FORECAST_FUNCTION_KEY,
     CONF_HASH,
+    CONF_INSTALLATION_ID,
     CONF_REGISTRATION_DATA,
+    CONF_SUBSCRIBE_URL,
+    CONF_SUBSCRIPTION_STATUS,
     CONF_URL,
     DEFAULT_ENVIRONMENT,
     DOMAIN,
+    ENTITLED_SUBSCRIPTION_STATUSES,
+    ISSUE_ENTITLEMENT_LOST,
+    ISSUE_FORECAST_CREDENTIAL_REFRESH,
+    PORTAL_BILLING_URL,
     PLATFORMS,
 )
 from .coordinator import MeshSolarCoordinator
+from .entry_data import (
+    entry_data_from_bootstrap,
+    no_subscription_entry_data,
+    runtime_from_entry_data,
+)
 from .entity_helpers import build_unique_id
 from .models import MeshSolarConfigData
+from .oauth import MeshSolarOAuth2Implementation
 
 _LOGGER = logging.getLogger(__name__)
+_CONFIG_ENTRY_VERSION = 2
 _LOCAL_DOCS_READY_KEY = f"{DOMAIN}_local_docs_ready"
 _LOCAL_DOCS_SOURCE = "local_docs/index.html"
 _LOCAL_DOCS_TARGET = ("www", "mesh_solar", "index.html")
@@ -50,6 +76,50 @@ _ENTRY_KEYS = (
     CONF_FORECAST_DEVICE_ID,
     CONF_FORECAST_DEVICE_TOKEN,
 )
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate old Mesh Solar config entries."""
+    if entry.version > _CONFIG_ENTRY_VERSION:
+        _LOGGER.error(
+            "Mesh Solar config entry %s has unsupported version %s",
+            entry.entry_id,
+            entry.version,
+        )
+        return False
+
+    if entry.version == _CONFIG_ENTRY_VERSION:
+        return True
+
+    if entry.version != 1:
+        _LOGGER.error(
+            "Mesh Solar config entry %s cannot migrate from version %s",
+            entry.entry_id,
+            entry.version,
+        )
+        return False
+
+    config_data = merged_config_data(entry)
+    updated_data = dict(entry.data)
+    for key in _ENTRY_KEYS:
+        updated_data[key] = config_data[key]
+
+    updated_options = dict(entry.options)
+    for key in _ENTRY_KEYS:
+        updated_options.pop(key, None)
+
+    hass.config_entries.async_update_entry(
+        entry,
+        data=updated_data,
+        options=updated_options,
+        version=_CONFIG_ENTRY_VERSION,
+    )
+    _LOGGER.info(
+        "Migrated Mesh Solar config entry %s from version 1 to version %s",
+        entry.entry_id,
+        _CONFIG_ENTRY_VERSION,
+    )
+    return True
 
 
 def _copy_local_docs_file(source_path: Path, target_path: Path) -> None:
@@ -93,6 +163,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     config_data = merged_config_data(entry)
     _sync_entry_data(hass=hass, entry=entry, config_data=config_data)
 
+    if _is_bootstrap_entry(entry):
+        await _async_refresh_bootstrap_if_due(hass, entry)
+        if entry.data.get(CONF_SUBSCRIPTION_STATUS) not in ENTITLED_SUBSCRIPTION_STATUSES:
+            _async_create_issue(
+                hass,
+                ISSUE_ENTITLEMENT_LOST,
+                entry.data.get(CONF_SUBSCRIBE_URL, PORTAL_BILLING_URL),
+            )
+            raise ConfigEntryAuthFailed(
+                "Mesh Solar trial or subscription is not valid. Subscribe, then reload or reconnect the integration."
+            )
+        config_data = merged_config_data(entry)
+
     validation_errors = validate_config_data(config_data)
     if validation_errors:
         invalid_fields = ", ".join(sorted(validation_errors))
@@ -109,6 +192,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         environment=config_data[CONF_ENVIRONMENT],
     )
 
+    credential_refresh = (
+        (lambda: _async_refresh_bootstrap_now(hass, entry))
+        if _is_bootstrap_entry(entry)
+        else None
+    )
+
     coordinator = MeshSolarCoordinator(
         hass=hass,
         entry=entry,
@@ -118,8 +207,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         environment=config_data[CONF_ENVIRONMENT],
         forecast_device_id=config_data[CONF_FORECAST_DEVICE_ID],
         forecast_device_token=config_data[CONF_FORECAST_DEVICE_TOKEN],
+        forecast_function_key=str(entry.data.get(CONF_FORECAST_FUNCTION_KEY, "")),
         initial_hash=config_data[CONF_HASH],
         initial_registration=config_data[CONF_REGISTRATION_DATA],
+        credential_refresh=credential_refresh,
     )
     try:
         await coordinator.async_config_entry_first_refresh()
@@ -174,6 +265,130 @@ def _sync_entry_data(
 
     hass.config_entries.async_update_entry(
         entry, data=updated_data, options=updated_options
+    )
+
+
+def _is_bootstrap_entry(entry: ConfigEntry) -> bool:
+    """Return whether the entry was configured through the HA bootstrap flow."""
+    return CONF_SUBSCRIPTION_STATUS in entry.data
+
+
+async def _async_refresh_bootstrap_if_due(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> None:
+    """Refresh bootstrap data when the backend requested refresh time has passed."""
+    if not _is_refresh_due(entry):
+        return
+
+    await _async_refresh_bootstrap_now(hass, entry)
+
+
+async def _async_refresh_bootstrap_now(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> bool:
+    """Refresh bootstrap data immediately and return whether credentials changed."""
+
+    runtime = runtime_from_entry_data(entry.data)
+    installation_id = str(entry.data.get(CONF_INSTALLATION_ID, "")).strip()
+    if runtime is None or not installation_id:
+        _async_create_issue(hass, ISSUE_FORECAST_CREDENTIAL_REFRESH)
+        raise ConfigEntryAuthFailed("Home Assistant bootstrap credentials are incomplete.")
+
+    implementation = MeshSolarOAuth2Implementation(
+        hass,
+        auth_domain=DOMAIN,
+        runtime=runtime,
+    )
+    oauth_session = config_entry_oauth2_flow.OAuth2Session(
+        hass,
+        entry,
+        implementation,
+    )
+    client = MeshSolarBootstrapClient(
+        oauth_session=oauth_session,
+        backend_api_base_url=runtime.backend_api_base_url,
+    )
+
+    try:
+        bootstrap = await client.async_bootstrap(
+            installation_id=installation_id,
+            device_token=str(entry.data.get(CONF_FORECAST_DEVICE_TOKEN, "")).strip()
+            or None,
+        )
+    except MeshSolarApiAuthError as err:
+        raise ConfigEntryAuthFailed("Home Assistant sign-in is required.") from err
+    except MeshSolarApiTransientError:
+        _async_create_issue(hass, ISSUE_FORECAST_CREDENTIAL_REFRESH)
+        _LOGGER.warning(
+            "Home Assistant bootstrap refresh failed temporarily for entry %s; keeping previous forecast credentials.",
+            entry.entry_id,
+        )
+        return False
+    except BootstrapValidationError as err:
+        raise ConfigEntryAuthFailed("Home Assistant bootstrap response is invalid.") from err
+    except MeshSolarApiError as err:
+        raise ConfigEntryAuthFailed("Home Assistant bootstrap failed.") from err
+
+    if not bootstrap.entitled:
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**entry.data, **no_subscription_entry_data(bootstrap)},
+        )
+        _async_create_issue(
+            hass,
+            ISSUE_ENTITLEMENT_LOST,
+            bootstrap.subscribe_url or PORTAL_BILLING_URL,
+        )
+        raise ConfigEntryAuthFailed(
+            "Mesh Solar trial or subscription is not valid. Subscribe, then reload or reconnect the integration."
+        )
+
+    updated = entry_data_from_bootstrap(
+        bootstrap=bootstrap,
+        oauth_data=entry.data,
+        runtime=runtime,
+        battery_capacity_sensor=str(entry.data.get(CONF_BATTERY_CAPACITY_SENSOR, "")),
+        environment=str(entry.data.get(CONF_ENVIRONMENT, "")),
+        device_token=str(entry.data.get(CONF_FORECAST_DEVICE_TOKEN, "")).strip()
+        or None,
+    )
+    hass.config_entries.async_update_entry(entry, data={**entry.data, **updated})
+    return True
+
+
+def _is_refresh_due(entry: ConfigEntry) -> bool:
+    value = entry.data.get(CONF_BOOTSTRAP_REFRESH_AFTER_UTC)
+    if not isinstance(value, str) or not value.strip():
+        return False
+
+    try:
+        refresh_after = datetime.fromisoformat(
+            value.strip().replace("Z", "+00:00")
+        ).astimezone(timezone.utc)
+    except ValueError:
+        return True
+
+    return refresh_after <= datetime.now(timezone.utc)
+
+
+def _async_create_issue(
+    hass: HomeAssistant,
+    issue_id: str,
+    subscribe_url: object = PORTAL_BILLING_URL,
+) -> None:
+    """Create a repair issue without exposing credentials."""
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        issue_id,
+        is_fixable=False,
+        severity=ir.IssueSeverity.ERROR,
+        translation_key=issue_id,
+        translation_placeholders={
+            "subscribe_url": str(subscribe_url or PORTAL_BILLING_URL)
+        },
     )
 
 

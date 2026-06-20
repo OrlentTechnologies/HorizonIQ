@@ -7,12 +7,17 @@ import pytest
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.mesh_solar.const import (
+    CONF_FORECAST_FUNCTION_KEY,
     CONF_HASH,
     CONF_REGISTRATION_DATA,
+    CONF_SUBSCRIPTION_STATUS,
+    CONF_URL,
+    EXACT_SUBSCRIPTION_FAILURE_BODY,
     FAILED_REFRESH_RETRY_SECONDS,
     HEADER_API_KEY,
     HEADER_MESH_DEVICE_ID,
     HEADER_MESH_DEVICE_TOKEN,
+    SUBSCRIPTION_STATUS_NO_SUBSCRIPTION,
     SANDBOX_ENVIRONMENT,
 )
 from custom_components.mesh_solar.coordinator import MeshSolarCoordinator
@@ -234,6 +239,85 @@ async def test_forecast_request_omits_trial_headers_when_blank(
     assert "integrationSource" not in headers
 
 
+async def test_forecast_request_uses_separate_function_key(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+    aioclient_mock,
+) -> None:
+    """Bootstrap entries store endpoint and function key separately."""
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "53")
+
+    coordinator = MeshSolarCoordinator(
+        hass,
+        mock_config_entry,
+        "https://example.com/api/Forecast_Get",
+        entry_data["api_key"],
+        entry_data["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+        forecast_function_key="returned-function-key",
+    )
+
+    aioclient_mock.get(coordinator._build_request_url("53"), json={})
+
+    await coordinator._async_update_data()
+
+    _, request_url, _, _headers = aioclient_mock.mock_calls[-1]
+    assert request_url.query["code"] == "returned-function-key"
+
+
+async def test_forecast_auth_failure_refreshes_key_and_retries_once(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+    aioclient_mock,
+) -> None:
+    """Bootstrap entries refresh credentials once after function-key rejection."""
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "53")
+    endpoint = "https://example.com/api/Forecast_Get"
+    mock_config_entry.data = {
+        **mock_config_entry.data,
+        CONF_URL: endpoint,
+        CONF_FORECAST_FUNCTION_KEY: "old-function-key",
+    }
+
+    async def refresh_credentials() -> bool:
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={
+                **mock_config_entry.data,
+                CONF_URL: endpoint,
+                CONF_FORECAST_FUNCTION_KEY: "new-function-key",
+            },
+        )
+        return True
+
+    credential_refresh = AsyncMock(side_effect=refresh_credentials)
+    coordinator = MeshSolarCoordinator(
+        hass,
+        mock_config_entry,
+        endpoint,
+        entry_data["api_key"],
+        entry_data["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+        forecast_function_key="old-function-key",
+        credential_refresh=credential_refresh,
+    )
+
+    first_url = coordinator._build_request_url("53")
+    aioclient_mock.get(first_url, status=403, json={"message": "Forbidden"})
+
+    retry_url = str(first_url).replace("old-function-key", "new-function-key")
+    aioclient_mock.get(retry_url, json={"Forecast": {"Periods": []}})
+
+    snapshot = await coordinator._async_update_data()
+
+    credential_refresh.assert_awaited_once()
+    assert snapshot.forecast_periods == []
+    _, request_url, _, _headers = aioclient_mock.mock_calls[-1]
+    assert request_url.query["code"] == "new-function-key"
+
+
 async def test_coordinator_uses_trial_payload_from_unauthorized_response(
     hass,
     mock_config_entry,
@@ -348,3 +432,41 @@ async def test_coordinator_failed_refresh_requests_one_minute_retry(
         await coordinator._async_update_data()
 
     assert exc_info.value.retry_after == FAILED_REFRESH_RETRY_SECONDS
+
+
+async def test_exact_subscription_failure_stops_polling_and_clears_cache(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+    aioclient_mock,
+) -> None:
+    """Exact backend no-subscription body marks the entry terminal."""
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "53")
+
+    coordinator = MeshSolarCoordinator(
+        hass,
+        mock_config_entry,
+        entry_data["url"],
+        entry_data["api_key"],
+        entry_data["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+        initial_hash="old-hash",
+        initial_registration="encrypted-registration",
+    )
+
+    aioclient_mock.get(
+        coordinator._build_request_url("53"),
+        status=400,
+        text=EXACT_SUBSCRIPTION_FAILURE_BODY,
+    )
+
+    with pytest.raises(UpdateFailed) as exc_info:
+        await coordinator._async_update_data()
+
+    assert str(exc_info.value) == EXACT_SUBSCRIPTION_FAILURE_BODY
+    assert coordinator.update_interval is None
+    assert mock_config_entry.data[CONF_SUBSCRIPTION_STATUS] == (
+        SUBSCRIPTION_STATUS_NO_SUBSCRIPTION
+    )
+    assert mock_config_entry.data[CONF_HASH] == ""
+    assert mock_config_entry.data[CONF_REGISTRATION_DATA] == ""

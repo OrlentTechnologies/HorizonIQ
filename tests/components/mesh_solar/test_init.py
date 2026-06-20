@@ -4,25 +4,82 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.mesh_solar import async_setup_entry
+from custom_components.mesh_solar import async_migrate_entry, async_setup_entry
 from custom_components.mesh_solar.const import (
     CONF_API_KEY,
     CONF_BATTERY_CAPACITY_SENSOR,
+    CONF_CAN_FORECAST,
     CONF_ENVIRONMENT,
     CONF_FORECAST_DEVICE_ID,
     CONF_FORECAST_DEVICE_TOKEN,
+    CONF_GX_DEVICE_ID,
     CONF_HASH,
     CONF_REGISTRATION_DATA,
+    CONF_SUBSCRIPTION_STATUS,
     CONF_URL,
     DEFAULT_ENVIRONMENT,
     DOMAIN,
     PLATFORMS,
+    SUBSCRIPTION_STATUS_NO_SUBSCRIPTION,
 )
 from custom_components.mesh_solar.entity_helpers import build_unique_id
+
+
+async def test_async_migrate_entry_upgrades_v1_manual_entry(hass) -> None:
+    """Version 1 manual forecast entries are upgraded to the current schema."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Mesh Solar",
+        data={
+            CONF_URL: "https://example.com/api/Forecast_Get?code=test-code",
+            CONF_API_KEY: "test-api-key",
+            CONF_BATTERY_CAPACITY_SENSOR: "sensor.battery_capacity",
+            CONF_ENVIRONMENT: "Live",
+            CONF_HASH: "existing-hash",
+            CONF_REGISTRATION_DATA: "existing-registration",
+            CONF_GX_DEVICE_ID: "legacy-gx-device",
+        },
+        options={
+            CONF_URL: "https://example.com/legacy-option",
+            CONF_API_KEY: "legacy-option-key",
+            "unrelated_option": "kept",
+        },
+        entry_id="legacy-entry",
+        version=1,
+    )
+    entry.add_to_hass(hass)
+
+    assert await async_migrate_entry(hass, entry)
+
+    assert entry.version == 2
+    assert entry.data[CONF_URL] == "https://example.com/api/Forecast_Get?code=test-code"
+    assert entry.data[CONF_API_KEY] == "test-api-key"
+    assert entry.data[CONF_ENVIRONMENT] == DEFAULT_ENVIRONMENT
+    assert entry.data[CONF_HASH] == "existing-hash"
+    assert entry.data[CONF_REGISTRATION_DATA] == "existing-registration"
+    assert entry.data[CONF_FORECAST_DEVICE_ID] == "legacy-gx-device"
+    assert entry.data[CONF_FORECAST_DEVICE_TOKEN] == ""
+    assert entry.data[CONF_GX_DEVICE_ID] == "legacy-gx-device"
+    assert entry.options == {"unrelated_option": "kept"}
+
+
+async def test_async_migrate_entry_rejects_future_version(hass) -> None:
+    """Entries from a newer integration version are left untouched."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Mesh Solar",
+        data={},
+        entry_id="future-entry",
+        version=99,
+    )
+    entry.add_to_hass(hass)
+
+    assert await async_migrate_entry(hass, entry) is False
+    assert entry.version == 99
 
 
 async def test_async_setup_entry_creates_coordinator_and_forwards_platforms(
@@ -60,8 +117,10 @@ async def test_async_setup_entry_creates_coordinator_and_forwards_platforms(
         environment=DEFAULT_ENVIRONMENT,
         forecast_device_id="",
         forecast_device_token="",
+        forecast_function_key="",
         initial_hash="",
         initial_registration="",
+        credential_refresh=None,
     )
     mock_forward.assert_awaited_once_with(mock_config_entry, PLATFORMS)
 
@@ -94,6 +153,34 @@ async def test_async_setup_entry_retries_when_initial_refresh_fails(
     coordinator.async_config_entry_first_refresh.assert_awaited_once()
     mock_forward.assert_not_awaited()
     assert mock_config_entry.entry_id not in hass.data.get(DOMAIN, {})
+
+
+async def test_async_setup_entry_stops_before_forecasting_when_no_subscription(
+    hass,
+    entry_data: dict[str, str],
+) -> None:
+    """A no-subscription bootstrap entry does not create a forecast coordinator."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Mesh Solar",
+        data={
+            **entry_data,
+            CONF_SUBSCRIPTION_STATUS: SUBSCRIPTION_STATUS_NO_SUBSCRIPTION,
+            CONF_CAN_FORECAST: False,
+        },
+        entry_id="no-subscription-entry",
+    )
+    entry.add_to_hass(hass)
+
+    with (
+        patch("custom_components.mesh_solar._ensure_local_docs", AsyncMock()),
+        patch("custom_components.mesh_solar.MeshSolarCoordinator") as coordinator_class,
+    ):
+        with pytest.raises(ConfigEntryAuthFailed):
+            await async_setup_entry(hass, entry)
+
+    coordinator_class.assert_not_called()
+    assert entry.entry_id not in hass.data.get(DOMAIN, {})
 
 
 async def test_async_setup_entry_sets_cadence_sensor_from_forecast_payload(
@@ -195,10 +282,7 @@ async def test_async_setup_entry_sets_cadence_sensor_from_forecast_payload(
         "status": "active",
         "forecast_cadence_minutes": 1,
     }
-    assert (
-        diagnostics_state.attributes["forecast"]["registration_data"]
-        == "encrypted-registration-data-new"
-    )
+    assert diagnostics_state.attributes["forecast"]["registration_data"] == "REDACTED"
     assert forecast_attributes["periods"] == [
         {
             "id": "7becc6a3-d881-420a-ab17-5c150044f008",

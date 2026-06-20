@@ -6,7 +6,7 @@ from homeassistant.const import UnitOfTime
 from ..entity import MeshSolarEntity
 from ..entity_helpers import (
     build_unique_id,
-    display_suffix,
+    entity_name,
     environment_label,
     normalized_environment,
 )
@@ -20,9 +20,7 @@ class ForecastCadenceSensor(MeshSolarEntity, SensorEntity):
     def __init__(self, coordinator, entry_id: str, environment: str) -> None:
         super().__init__(coordinator)
         self._environment = normalized_environment(environment)
-        self._attr_name = (
-            f"Mesh Solar Forecast Cadence{display_suffix(self._environment)}"
-        )
+        self._attr_name = entity_name(self._environment, "Forecast Cadence")
         self._attr_unique_id = build_unique_id(
             self._environment, entry_id, "forecast_cadence"
         )

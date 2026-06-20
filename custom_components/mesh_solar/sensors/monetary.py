@@ -10,7 +10,7 @@ from homeassistant.components.sensor import (
 from ..entity import MeshSolarEntity
 from ..entity_helpers import (
     build_unique_id,
-    display_suffix,
+    entity_name,
     environment_label,
     normalized_environment,
 )
@@ -35,7 +35,7 @@ class MonetarySensor(MeshSolarEntity, SensorEntity):
         super().__init__(coordinator)
         self._environment = normalized_environment(environment)
         self._value_field = value_field
-        self._attr_name = f"Mesh Solar {name_suffix}{display_suffix(self._environment)}"
+        self._attr_name = entity_name(self._environment, name_suffix)
         self._attr_unique_id = build_unique_id(
             self._environment, entry_id, unique_suffix
         )
