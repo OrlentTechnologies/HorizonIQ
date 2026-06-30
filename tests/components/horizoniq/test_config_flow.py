@@ -357,6 +357,60 @@ async def test_no_subscription_subscribe_redirects_to_billing_portal(hass) -> No
     assert result["step_id"] == "no_subscription"
 
 
+async def test_no_subscription_subscribe_redirects_to_test_mode_billing_portal(
+    hass,
+) -> None:
+    """Test Mode subscribe stays on the same selected portal host."""
+    portal_connection_url = "https://sandbox.example.test/portal/horizoniq/connect"
+
+    async def fake_begin_oauth(flow: HorizonIQConfigFlow):
+        flow._bootstrap = _bootstrap_no_subscription(
+            reason="no_subscription",
+            trial_eligible=False,
+        )
+        return await flow.async_step_no_subscription()
+
+    with (
+        patch(
+            "custom_components.horizoniq.config_flow.instance_id.async_get",
+            AsyncMock(return_value="76d85cbc-5a44-4e41-88f7-f02f41562f15"),
+        ),
+        patch(
+            "custom_components.horizoniq.config_flow.HorizonIQConfigFlow._async_begin_oauth",
+            side_effect=fake_begin_oauth,
+            autospec=True,
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": config_entries.SOURCE_USER},
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                "action": ACTION_SIGN_IN,
+                CONF_BATTERY_CAPACITY_SENSOR: "sensor.battery_capacity",
+                CONF_TEST_MODE: True,
+                CONF_PORTAL_CONNECTION_URL: portal_connection_url,
+            },
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "no_subscription"
+    assert result["description_placeholders"]["subscribe_url"] == (
+        "https://sandbox.example.test/portal/billing"
+    )
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        user_input={"action": ACTION_SUBSCRIBE},
+    )
+
+    assert result["type"] == FlowResultType.EXTERNAL_STEP
+    assert result["step_id"] == ACTION_SUBSCRIBE
+    assert result["url"] == "https://sandbox.example.test/portal/billing"
+
+
 def test_trial_bootstrap_creates_forecast_entry_with_trial_cadence() -> None:
     """A valid trial creates forecast configuration using the trial interval."""
     flow = _entitled_flow()

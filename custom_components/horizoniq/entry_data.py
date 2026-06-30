@@ -31,6 +31,7 @@ from .const import (
     SUBSCRIPTION_STATUS_TRIAL,
 )
 from .oauth import OAuthRuntimeConfig
+from .portal import billing_url_from_portal_connection_url
 
 CONF_OAUTH_RUNTIME = "oauth_runtime"
 
@@ -70,7 +71,7 @@ def entry_data_from_bootstrap(
         CONF_ENTITLEMENT_EXPIRES_ON_UTC: bootstrap.entitlement_expires_on_utc or "",
         CONF_REGISTRATION_CONFIG: bootstrap.registration,
         CONF_BOOTSTRAP_SCHEMA_VERSION: bootstrap.schema_version,
-        CONF_SUBSCRIBE_URL: PORTAL_BILLING_URL,
+        CONF_SUBSCRIBE_URL: _billing_url(runtime),
         CONF_URL: bootstrap.forecast.endpoint,
         CONF_API_KEY: bootstrap.registration_id,
         CONF_BATTERY_CAPACITY_SENSOR: battery_capacity_sensor,
@@ -87,20 +88,40 @@ def entry_data_from_bootstrap(
     }
 
 
-def no_subscription_entry_data(bootstrap: BootstrapData) -> dict[str, object]:
+def no_subscription_entry_data(
+    bootstrap: BootstrapData,
+    *,
+    runtime: OAuthRuntimeConfig | None = None,
+) -> dict[str, object]:
     """Build a config-entry update for a valid no-subscription response."""
-    return {
+    entry_data: dict[str, object] = {
         CONF_SUBSCRIPTION_STATUS: bootstrap.subscription_status,
         CONF_CAN_FORECAST: False,
         CONF_BOOTSTRAP_REASON: bootstrap.reason or "",
         CONF_BOOTSTRAP_REFRESH_AFTER_UTC: bootstrap.refresh_after_utc or "",
         CONF_ENTITLEMENT_EXPIRES_ON_UTC: bootstrap.entitlement_expires_on_utc or "",
-        CONF_SUBSCRIBE_URL: PORTAL_BILLING_URL,
+        CONF_SUBSCRIBE_URL: _billing_url(runtime),
         CONF_FORECAST_FUNCTION_KEY: "",
         CONF_FORECAST_DEVICE_TOKEN: "",
         CONF_HASH: "",
         CONF_REGISTRATION_DATA: "",
     }
+    if runtime is not None:
+        entry_data[CONF_OAUTH_RUNTIME] = _runtime_data(runtime)
+    return entry_data
+
+
+def billing_url_from_entry_data(entry_data: Mapping[str, Any]) -> str:
+    """Return the billing URL derived from persisted runtime or fallback data."""
+    runtime = runtime_from_entry_data(entry_data)
+    if runtime is not None:
+        return _billing_url(runtime)
+
+    subscribe_url = entry_data.get(CONF_SUBSCRIBE_URL)
+    if isinstance(subscribe_url, str) and subscribe_url.strip():
+        return subscribe_url.strip()
+
+    return PORTAL_BILLING_URL
 
 
 def runtime_from_entry_data(entry_data: Mapping[str, Any]) -> OAuthRuntimeConfig | None:
@@ -138,6 +159,12 @@ def _runtime_data(runtime: OAuthRuntimeConfig | None) -> dict[str, str]:
         "backend_api_scope": runtime.backend_api_scope,
         "backend_api_base_url": runtime.backend_api_base_url,
     }
+
+
+def _billing_url(runtime: OAuthRuntimeConfig | None) -> str:
+    return billing_url_from_portal_connection_url(
+        runtime.portal_connection_url if runtime is not None else None
+    )
 
 
 def _required_text(data: Mapping[str, Any], key: str) -> str:

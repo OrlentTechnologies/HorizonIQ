@@ -26,6 +26,7 @@ from custom_components.horizoniq.const import (
     PLATFORMS,
     SUBSCRIPTION_STATUS_NO_SUBSCRIPTION,
 )
+from custom_components.horizoniq.entry_data import CONF_OAUTH_RUNTIME
 from custom_components.horizoniq.entity_helpers import build_unique_id
 
 
@@ -167,6 +168,15 @@ async def test_async_setup_entry_stops_before_forecasting_when_no_subscription(
             **entry_data,
             CONF_SUBSCRIPTION_STATUS: SUBSCRIPTION_STATUS_NO_SUBSCRIPTION,
             CONF_CAN_FORECAST: False,
+            CONF_OAUTH_RUNTIME: {
+                "client_id": "ha-client",
+                "portal_connection_url": (
+                    "https://sandbox.example.test/portal/horizoniq/connect"
+                ),
+                "token_endpoint": "https://login.example.test/token",
+                "backend_api_scope": "api://backend/user_impersonation",
+                "backend_api_base_url": "https://api.example.test",
+            },
         },
         entry_id="no-subscription-entry",
     )
@@ -174,12 +184,18 @@ async def test_async_setup_entry_stops_before_forecasting_when_no_subscription(
 
     with (
         patch("custom_components.horizoniq._ensure_local_docs", AsyncMock()),
+        patch("custom_components.horizoniq._async_create_issue") as create_issue,
         patch("custom_components.horizoniq.HorizonIQCoordinator") as coordinator_class,
     ):
         with pytest.raises(ConfigEntryAuthFailed):
             await async_setup_entry(hass, entry)
 
     coordinator_class.assert_not_called()
+    create_issue.assert_called_once_with(
+        hass,
+        "entitlement_lost",
+        "https://sandbox.example.test/portal/billing",
+    )
     assert entry.entry_id not in hass.data.get(DOMAIN, {})
 
 

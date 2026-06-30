@@ -36,6 +36,7 @@ This integration can be installed through HACS as a custom repository.
 - Sends your current battery capacity, plus cached forecast `hash` and `registration_data`, to reduce payload churn.
 - Exposes import/export mode, monetary values, forecast diagnostics, and BMS state as entities.
 - Provides a `Clear Registration` button that clears cached registration data and refreshes immediately.
+- Keeps Test Mode portal redirects on the same selected portal host for sign-in, subscribe, and repair links.
 
 ## Configuration Fields
 

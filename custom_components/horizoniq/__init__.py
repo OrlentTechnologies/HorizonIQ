@@ -43,6 +43,7 @@ from .const import (
 )
 from .coordinator import HorizonIQCoordinator
 from .entry_data import (
+    billing_url_from_entry_data,
     entry_data_from_bootstrap,
     no_subscription_entry_data,
     runtime_from_entry_data,
@@ -169,7 +170,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _async_create_issue(
                 hass,
                 ISSUE_ENTITLEMENT_LOST,
-                PORTAL_BILLING_URL,
+                billing_url_from_entry_data(entry.data),
             )
             raise ConfigEntryAuthFailed(
                 "HorizonIQ trial or subscription is not valid. Subscribe, then reload or reconnect the integration."
@@ -332,14 +333,18 @@ async def _async_refresh_bootstrap_now(
         raise ConfigEntryAuthFailed("Home Assistant bootstrap failed.") from err
 
     if not bootstrap.entitled:
+        updated_entry_data = {
+            **entry.data,
+            **no_subscription_entry_data(bootstrap, runtime=runtime),
+        }
         hass.config_entries.async_update_entry(
             entry,
-            data={**entry.data, **no_subscription_entry_data(bootstrap)},
+            data=updated_entry_data,
         )
         _async_create_issue(
             hass,
             ISSUE_ENTITLEMENT_LOST,
-            PORTAL_BILLING_URL,
+            billing_url_from_entry_data(updated_entry_data),
         )
         raise ConfigEntryAuthFailed(
             "HorizonIQ trial or subscription is not valid. Subscribe, then reload or reconnect the integration."

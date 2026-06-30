@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 from aiohttp import ClientError
@@ -62,6 +61,7 @@ from .oauth import (
     OAuthRuntimeConfigError,
     async_get_oauth_runtime_config,
 )
+from .portal import billing_url_from_portal_connection_url, is_portal_connection_url
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -148,7 +148,7 @@ class HorizonIQConfigFlow(
             if test_mode:
                 if portal_connection_url is None:
                     errors[CONF_PORTAL_CONNECTION_URL] = "required"
-                elif not _is_valid_portal_connection_url(portal_connection_url):
+                elif not is_portal_connection_url(portal_connection_url):
                     errors[CONF_PORTAL_CONNECTION_URL] = "invalid_url"
             else:
                 portal_connection_url = None
@@ -250,7 +250,8 @@ class HorizonIQConfigFlow(
                         data_schema=_no_subscription_schema(bootstrap),
                         errors={"base": "service_unavailable"},
                         description_placeholders=_no_subscription_placeholders(
-                            bootstrap
+                            bootstrap,
+                            subscribe_url=self._active_billing_url(),
                         ),
                     )
                 if self._bootstrap.entitled:
@@ -263,7 +264,7 @@ class HorizonIQConfigFlow(
             if action == ACTION_SUBSCRIBE:
                 return self.async_external_step(
                     step_id=ACTION_SUBSCRIBE,
-                    url=PORTAL_BILLING_URL,
+                    url=self._active_billing_url(),
                 )
 
             return self.async_abort(reason="subscription_required")
@@ -272,7 +273,10 @@ class HorizonIQConfigFlow(
             step_id="no_subscription",
             data_schema=_no_subscription_schema(bootstrap),
             errors={},
-            description_placeholders=_no_subscription_placeholders(bootstrap),
+            description_placeholders=_no_subscription_placeholders(
+                bootstrap,
+                subscribe_url=self._active_billing_url(),
+            ),
         )
 
     async def async_step_subscribe(
@@ -347,6 +351,7 @@ class HorizonIQConfigFlow(
             auth_domain=DOMAIN,
             runtime=self._runtime,
         )
+        self._portal_connection_url = self._runtime.portal_connection_url
         return await self.async_step_auth()
 
     async def _async_bootstrap(
@@ -403,6 +408,10 @@ class HorizonIQConfigFlow(
             title=_entry_title(self._environment),
             data=entry_data,
         )
+
+    def _active_billing_url(self) -> str:
+        """Return the billing portal for the active flow runtime."""
+        return billing_url_from_portal_connection_url(self._portal_connection_url)
 
 
 class HorizonIQOptionsFlow(config_entries.OptionsFlow):
@@ -491,10 +500,14 @@ def _no_subscription_schema(bootstrap: BootstrapData) -> vol.Schema:
     )
 
 
-def _no_subscription_placeholders(bootstrap: BootstrapData) -> dict[str, str]:
+def _no_subscription_placeholders(
+    bootstrap: BootstrapData,
+    *,
+    subscribe_url: str = PORTAL_BILLING_URL,
+) -> dict[str, str]:
     return {
         "reason": bootstrap.reason or SUBSCRIPTION_STATUS_NO_SUBSCRIPTION,
-        "subscribe_url": PORTAL_BILLING_URL,
+        "subscribe_url": subscribe_url,
         "installation_id": bootstrap.installation_id,
     }
 
@@ -526,21 +539,3 @@ def _normalize_installation_id(value: str) -> str:
     except ValueError:
         return value
 
-
-def _is_valid_portal_connection_url(value: str) -> bool:
-    try:
-        parsed = urlparse(value.strip())
-    except ValueError:
-        return False
-
-    if (
-        parsed.scheme != "https"
-        or not parsed.netloc
-        or parsed.username
-        or parsed.query
-        or parsed.fragment
-        or parsed.path.rstrip("/") != "/portal/horizoniq/connect"
-    ):
-        return False
-
-    return True

@@ -13,6 +13,7 @@ from homeassistant.helpers.config_entry_oauth2_flow import (
 )
 
 from .const import PORTAL_CONNECT_URL, PORTAL_RUNTIME_CONFIG_URL, REQUEST_TIMEOUT_SECONDS
+from .portal import normalize_portal_connection_url
 
 
 class OAuthRuntimeConfigError(ValueError):
@@ -140,19 +141,12 @@ def _validated_portal_connection_url(value: str | None) -> str | None:
     if value is None or not value.strip():
         return None
 
-    normalized = value.strip()
-    parsed = urlparse(normalized)
-    if (
-        parsed.scheme != "https"
-        or not parsed.netloc
-        or parsed.username
-        or parsed.query
-        or parsed.fragment
-        or parsed.path.rstrip("/") != "/portal/horizoniq/connect"
-    ):
-        raise OAuthRuntimeConfigError("Invalid Home Assistant portal connection URL")
-
-    return urlunparse(parsed._replace(path=parsed.path.rstrip("/")))
+    try:
+        return normalize_portal_connection_url(value)
+    except ValueError as err:
+        raise OAuthRuntimeConfigError(
+            "Invalid Home Assistant portal connection URL"
+        ) from err
 
 
 async def _resolve_token_endpoint(

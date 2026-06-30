@@ -1,7 +1,7 @@
 from homeassistant.const import Platform
 
 DOMAIN = "horizoniq"
-INTEGRATION_VERSION = "2.0.11"
+INTEGRATION_VERSION = "2.0.12"
 
 CONF_URL = "url"
 CONF_API_KEY = "api_key"
