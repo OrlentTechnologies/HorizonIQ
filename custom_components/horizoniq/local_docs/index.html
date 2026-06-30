@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HorizonIQ Documentation</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --text: #132030;
+      --muted: #425b76;
+      --line: #d8e0ea;
+      --accent: #0a84ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .wrap {
+      max-width: 980px;
+      margin: 24px auto;
+      padding: 0 16px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 20px;
+      margin-bottom: 14px;
+    }
+    h1, h2 { margin: 0 0 10px; }
+    h1 { font-size: 1.6rem; }
+    h2 { font-size: 1.2rem; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+    p { margin: 8px 0; }
+    ul { margin: 8px 0 8px 18px; }
+    code {
+      background: #eef3f8;
+      border: 1px solid #dbe4ee;
+      border-radius: 4px;
+      padding: 1px 5px;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 0.95em;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      font-size: 0.96rem;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 8px;
+      vertical-align: top;
+      text-align: left;
+    }
+    th { background: #f1f5f9; }
+    .muted { color: var(--muted); }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>HorizonIQ</h1>
+      <p class="muted">Local documentation served from your Home Assistant instance.</p>
+      <p>This integration polls your HorizonIQ forecast API, exposes forecast entities in Home Assistant, and caches tokens needed for efficient polling.</p>
+    </div>
+
+    <div class="card">
+      <h2>Configuration Fields</h2>
+      <table>
+        <thead>
+          <tr><th>Field</th><th>Required</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>home_assistant_installation_id</code></td><td>Read-only</td><td>Stable Home Assistant installation identifier from <code>core.uuid</code>, shown for copying when registering licensing or trials. Not stored by this integration.</td></tr>
+          <tr><td><code>url</code></td><td>Yes</td><td>Forecast API endpoint URL.</td></tr>
+          <tr><td><code>api_key</code></td><td>Yes</td><td>API key sent in request header <code>X-API-KEY</code>.</td></tr>
+          <tr><td><code>battery_capacity_sensor</code></td><td>Yes</td><td>Entity ID whose state is sent as <code>currentBatteryCapacity</code>.</td></tr>
+          <tr><td><code>environment</code></td><td>No</td><td>Environment selector (<code>Live</code> or <code>Sandbox</code>).</td></tr>
+          <tr><td><code>hash</code></td><td>No</td><td>Deterministic result of the most recent forecast, sent as the <code>hash</code> query value.</td></tr>
+          <tr><td><code>registration_data</code></td><td>No</td><td>Registration data for your site. Sent as <code>registrationData</code> so it is not constantly reloaded from the database. Refreshes daily or when force-refreshed with the clear registration button.</td></tr>
+          <tr><td><code>forecast_device_id</code></td><td>No</td><td>Canonical device ID for app-owned trial binding, sent as <code>X-HorizonIQ-Device-Id</code> when set. Victron/Home Assistant setups usually use the GX device ID.</td></tr>
+          <tr><td><code>forecast_device_token</code></td><td>No</td><td>Portal-generated app trial device token, sent as <code>X-HorizonIQ-Device-Token</code> when set.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Entities</h2>
+      <p><strong>Binary Sensors</strong></p>
+      <ul>
+        <li><code>HorizonIQ Import</code></li>
+        <li><code>HorizonIQ Export</code></li>
+      </ul>
+      <p><strong>Sensors</strong></p>
+      <ul>
+        <li><code>HorizonIQ Total Cost</code></li>
+        <li><code>HorizonIQ Charging Cost</code></li>
+        <li><code>HorizonIQ Saving</code></li>
+        <li><code>HorizonIQ Forecast Diagnostics</code></li>
+        <li><code>HorizonIQ BMS State</code></li>
+        <li><code>HorizonIQ Trial Status</code></li>
+      </ul>
+      <p><strong>Button</strong></p>
+      <ul>
+        <li><code>HorizonIQ Clear Registration</code> clears cached <code>registration_data</code> and triggers a refresh.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>Stored Client-Side Data</h2>
+      <p>Persisted in Home Assistant config entries:</p>
+      <ul>
+        <li><code>url</code></li>
+        <li><code>api_key</code></li>
+        <li><code>battery_capacity_sensor</code></li>
+        <li><code>environment</code></li>
+        <li><code>hash</code></li>
+        <li><code>registration_data</code></li>
+        <li><code>forecast_device_id</code></li>
+        <li><code>forecast_device_token</code></li>
+      </ul>
+      <p>The read-only Home Assistant Installation ID is read from Home Assistant <code>core.uuid</code> storage and displayed only as metadata.</p>
+      <p>Runtime-only values (not persisted): normalized forecast payload, periods, currency, target capacity, app trial status, authorization diagnostics, and last update status.</p>
+    </div>
+
+    <div class="card">
+      <h2>Request Notes</h2>
+      <p>The optional app-trial headers are <code>X-HorizonIQ-Device-Id</code> and <code>X-HorizonIQ-Device-Token</code>.</p>
+    </div>
+
+    <div class="card">
+      <h2>More Detail</h2>
+      <p>For full details and changelog, see the project README in the GitHub repository for this integration.</p>
+    </div>
+  </div>
+</body>
+</html>
