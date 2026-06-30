@@ -1,1 +1,0 @@
-"""Mesh Solar integration tests."""

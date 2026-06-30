@@ -13,7 +13,7 @@ This repository is a Home Assistant custom integration.
 ```text
 root
 ├─ custom_components/
-│   └─ mesh_solar/
+│   └─ horizoniq/
 │       ├─ local_docs           # integration documentation
 │       ├─ sensors              # sensors
 │       ├─ translations         # languages
@@ -109,6 +109,13 @@ root
 * Use async clients consistently rather than mixing sync and async implementations
 
 ## Testing
+
+When running Python tests for this Home Assistant integration on Windows, do not call python or pytest directly. Run tests through WSL using:
+
+wsl bash -lc "cd /mnt/c/git/ha-integration && source .venv-wsl/bin/activate && python -m pytest tests/components/horizoniq -q"
+
+Native Windows Python cannot run these tests because Home Assistant imports fcntl, which only exists on Linux/macOS.
+When running that WSL command from Codex, request unsandboxed execution if needed. In this workspace the sandbox can report that no WSL distributions are installed even when the host PowerShell session can run WSL successfully.
 
 * Write unit tests for business logic
 * Use integration tests for real Home Assistant or API behaviour
