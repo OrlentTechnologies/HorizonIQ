@@ -5,6 +5,7 @@ import pytest
 from custom_components.horizoniq.const import PORTAL_BILLING_URL
 from custom_components.horizoniq.portal import (
     billing_url_from_portal_connection_url,
+    is_portal_connection_url,
     normalize_portal_connection_url,
     portal_base_url_from_connection_url,
 )
@@ -27,6 +28,13 @@ def test_normalize_portal_connection_url_removes_trailing_slash() -> None:
     assert normalize_portal_connection_url(
         " https://sandbox.example.test/portal/horizoniq/connect/ "
     ) == "https://sandbox.example.test/portal/horizoniq/connect"
+
+
+def test_horizoniq_connect_url_is_accepted() -> None:
+    """The HorizonIQ portal connect URL remains accepted in validation."""
+    assert is_portal_connection_url(
+        "https://sandbox.example.test/portal/horizoniq/connect"
+    )
 
 
 @pytest.mark.parametrize(
