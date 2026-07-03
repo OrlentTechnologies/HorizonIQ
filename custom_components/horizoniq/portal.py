@@ -8,6 +8,13 @@ _PORTAL_CONNECT_PATH = "/portal/horizoniq/connect"
 _PORTAL_BILLING_PATH = "/portal/billing"
 
 
+def _has_horizoniq_connect_path(path: str) -> bool:
+    """Return whether the supplied path ends with the HorizonIQ connect route."""
+    normalized_path = path.rstrip("/")
+    segments = [segment for segment in normalized_path.split("/") if segment]
+    return len(segments) >= 3 and segments[-3:] == ["portal", "horizoniq", "connect"]
+
+
 def normalize_portal_connection_url(value: str) -> str:
     """Return a canonical portal connect URL or raise ValueError."""
     normalized = value.strip()
@@ -18,7 +25,7 @@ def normalize_portal_connection_url(value: str) -> str:
         or parsed.username
         or parsed.query
         or parsed.fragment
-        or parsed.path.rstrip("/") != _PORTAL_CONNECT_PATH
+        or not _has_horizoniq_connect_path(parsed.path)
     ):
         raise ValueError("Invalid Home Assistant portal connection URL")
 

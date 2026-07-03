@@ -76,7 +76,7 @@ async def test_user_flow_shows_sign_in_create_and_battery_sensor(
     monkeypatch.delenv("HORIZONIQ_DEVELOPER_MODE", raising=False)
     monkeypatch.setenv(
         "HORIZONIQ_TEST_URL",
-        "https://sandbox.example.test/portal/ha-integration/connect",
+        "https://sandbox.example.test/portal/horizoniq/connect",
     )
     with patch(
         "custom_components.horizoniq.config_flow.instance_id.async_get",
@@ -103,7 +103,7 @@ async def test_user_flow_shows_test_controls_in_developer_mode(
 ) -> None:
     """Developer mode exposes sandbox setup controls."""
     monkeypatch.setenv("HORIZONIQ_DEVELOPER_MODE", "")
-    test_url = "https://sandbox.example.test/portal/ha-integration/connect"
+    test_url = "https://sandbox.example.test/portal/horizoniq/connect"
     monkeypatch.setenv("HORIZONIQ_TEST_URL", test_url)
 
     result = await hass.config_entries.flow.async_init(
