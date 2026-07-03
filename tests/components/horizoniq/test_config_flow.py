@@ -392,9 +392,10 @@ async def test_no_subscription_subscribe_redirects_to_billing_portal(hass) -> No
 
 
 async def test_no_subscription_subscribe_redirects_to_test_mode_billing_portal(
-    hass,
+    hass, monkeypatch
 ) -> None:
     """Test Mode subscribe stays on the same selected portal host."""
+    monkeypatch.setenv("HORIZONIQ_DEVELOPER_MODE", "1")
     portal_connection_url = "https://sandbox.example.test/portal/horizoniq/connect"
 
     async def fake_begin_oauth(flow: HorizonIQConfigFlow):
