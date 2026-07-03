@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -47,10 +48,12 @@ from .const import (
     CONF_URL,
     DEFAULT_ENVIRONMENT,
     DEFAULT_TITLE,
+    DEVELOPER_MODE_ENVIRONMENT_VARIABLE,
     DOMAIN,
     PORTAL_BILLING_URL,
     SANDBOX_ENVIRONMENT,
     SUBSCRIPTION_STATUS_NO_SUBSCRIPTION,
+    TEST_URL_ENVIRONMENT_VARIABLE,
     display_environment,
     normalize_environment,
 )
@@ -71,6 +74,43 @@ _BOOTSTRAP_REASON_TRIAL_DEVICE_TOKEN_REQUIRED = "trial_device_token_required"
 _READ_ONLY_TEXT_SELECTOR = selector.TextSelector(
     selector.TextSelectorConfig(read_only=True)
 )
+
+
+def _developer_mode_enabled() -> bool:
+    """Return whether developer-only config flow controls are enabled."""
+    return DEVELOPER_MODE_ENVIRONMENT_VARIABLE in os.environ
+
+
+def _user_schema(
+    *, installation_id: str, battery_capacity_sensor: str
+) -> vol.Schema:
+    """Build the initial config flow schema."""
+    fields: dict[vol.Marker, object] = {
+        vol.Optional(
+            CONF_HOME_ASSISTANT_INSTALLATION_ID,
+            default=installation_id,
+        ): str,
+        vol.Required(_CONF_ACTION, default=ACTION_SIGN_IN): vol.In(
+            {
+                ACTION_SIGN_IN: "Sign In",
+                ACTION_CREATE_ACCOUNT: "Create Account",
+            }
+        ),
+        vol.Required(
+            CONF_BATTERY_CAPACITY_SENSOR,
+            default=battery_capacity_sensor,
+        ): str,
+    }
+    if _developer_mode_enabled():
+        fields[vol.Optional(CONF_TEST_MODE, default=False)] = bool
+        fields[
+            vol.Optional(
+                CONF_PORTAL_CONNECTION_URL,
+                default=os.environ.get(TEST_URL_ENVIRONMENT_VARIABLE, "").strip(),
+            )
+        ] = str
+
+    return vol.Schema(fields)
 
 
 class HorizonIQConfigFlow(
@@ -118,7 +158,8 @@ class HorizonIQConfigFlow(
 
         if user_input is not None:
             action = str(user_input.get(_CONF_ACTION, "")).strip()
-            test_mode = user_input.get(CONF_TEST_MODE) is True
+            developer_mode = _developer_mode_enabled()
+            test_mode = developer_mode and user_input.get(CONF_TEST_MODE) is True
             selected_environment = (
                 SANDBOX_ENVIRONMENT if test_mode else DEFAULT_ENVIRONMENT
             )
@@ -162,25 +203,9 @@ class HorizonIQConfigFlow(
 
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_HOME_ASSISTANT_INSTALLATION_ID,
-                        default=await _async_installation_id(self.hass),
-                    ): str,
-                    vol.Required(_CONF_ACTION, default=ACTION_SIGN_IN): vol.In(
-                        {
-                            ACTION_SIGN_IN: "Sign In",
-                            ACTION_CREATE_ACCOUNT: "Create Account",
-                        }
-                    ),
-                    vol.Required(
-                        CONF_BATTERY_CAPACITY_SENSOR,
-                        default=config_data[CONF_BATTERY_CAPACITY_SENSOR],
-                    ): str,
-                    vol.Optional(CONF_TEST_MODE, default=False): bool,
-                    vol.Optional(CONF_PORTAL_CONNECTION_URL, default=""): str,
-                }
+            data_schema=_user_schema(
+                installation_id=await _async_installation_id(self.hass),
+                battery_capacity_sensor=config_data[CONF_BATTERY_CAPACITY_SENSOR],
             ),
             errors=errors,
         )

@@ -69,8 +69,15 @@ def _runtime() -> OAuthRuntimeConfig:
     )
 
 
-async def test_user_flow_shows_sign_in_create_and_battery_sensor(hass) -> None:
+async def test_user_flow_shows_sign_in_create_and_battery_sensor(
+    hass, monkeypatch
+) -> None:
     """Initial setup offers account actions instead of manual forecast keys."""
+    monkeypatch.delenv("HORIZONIQ_DEVELOPER_MODE", raising=False)
+    monkeypatch.setenv(
+        "HORIZONIQ_TEST_URL",
+        "https://sandbox.example.test/portal/ha-integration/connect",
+    )
     with patch(
         "custom_components.horizoniq.config_flow.instance_id.async_get",
         AsyncMock(return_value="76d85cbc-5a44-4e41-88f7-f02f41562f15"),
@@ -87,8 +94,26 @@ async def test_user_flow_shows_sign_in_create_and_battery_sensor(hass) -> None:
     )
     assert defaults["action"] == ACTION_SIGN_IN
     assert defaults[CONF_BATTERY_CAPACITY_SENSOR] == "sensor.battery_capacity"
+    assert CONF_TEST_MODE not in defaults
+    assert CONF_PORTAL_CONNECTION_URL not in defaults
+
+
+async def test_user_flow_shows_test_controls_in_developer_mode(
+    hass, monkeypatch
+) -> None:
+    """Developer mode exposes sandbox setup controls."""
+    monkeypatch.setenv("HORIZONIQ_DEVELOPER_MODE", "")
+    test_url = "https://sandbox.example.test/portal/ha-integration/connect"
+    monkeypatch.setenv("HORIZONIQ_TEST_URL", test_url)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_USER},
+    )
+
+    defaults = result["data_schema"]({})
     assert defaults[CONF_TEST_MODE] is False
-    assert defaults[CONF_PORTAL_CONNECTION_URL] == ""
+    assert defaults[CONF_PORTAL_CONNECTION_URL] == test_url
 
 
 async def test_user_flow_create_account_generates_portal_oauth_url(hass) -> None:
@@ -164,8 +189,11 @@ async def test_user_flow_normalizes_hex_instance_id_to_uuid(hass) -> None:
     ]
 
 
-async def test_user_flow_test_mode_uses_manual_portal_connection_url(hass) -> None:
+async def test_user_flow_test_mode_uses_manual_portal_connection_url(
+    hass, monkeypatch
+) -> None:
     """Test Mode requires and uses the manually entered sandbox portal URL."""
+    monkeypatch.setenv("HORIZONIQ_DEVELOPER_MODE", "1")
     hass.config.components.add("my")
     portal_connection_url = (
         "https://sandbox.example.test/portal/horizoniq/connect"
@@ -202,8 +230,11 @@ async def test_user_flow_test_mode_uses_manual_portal_connection_url(hass) -> No
     )
 
 
-async def test_user_flow_test_mode_sets_sandbox_environment(hass) -> None:
+async def test_user_flow_test_mode_sets_sandbox_environment(
+    hass, monkeypatch
+) -> None:
     """Test Mode stores Sandbox instead of overwriting the Live entry data."""
+    monkeypatch.setenv("HORIZONIQ_DEVELOPER_MODE", "1")
     captured: dict[str, str] = {}
 
     async def fake_begin_oauth(flow):
@@ -241,8 +272,11 @@ async def test_user_flow_test_mode_sets_sandbox_environment(hass) -> None:
     assert captured["environment"] == SANDBOX_ENVIRONMENT
 
 
-async def test_user_flow_test_mode_requires_manual_portal_connection_url(hass) -> None:
+async def test_user_flow_test_mode_requires_manual_portal_connection_url(
+    hass, monkeypatch
+) -> None:
     """Test Mode does not auto-populate a sandbox portal URL."""
+    monkeypatch.setenv("HORIZONIQ_DEVELOPER_MODE", "1")
     result = await hass.config_entries.flow.async_init(
         DOMAIN,
         context={"source": config_entries.SOURCE_USER},
