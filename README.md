@@ -1,9 +1,11 @@
-# Mesh Solar (Home Assistant Custom Integration)
+# HorizonIQ (Home Assistant Custom Integration)
 
-This integration polls a Mesh Solar forecast endpoint and exposes forecast-driven entities in Home Assistant.
+HorizonIQ is developed by Orlent Technologies.
+
+This integration polls a HorizonIQ forecast endpoint and exposes forecast-driven entities in Home Assistant.
 
 When loaded, the integration publishes a local documentation page to:
-- `/local/mesh_solar/index.html`
+- `/local/horizoniq/index.html`
 
 ## Installation
 
@@ -11,22 +13,22 @@ When loaded, the integration publishes a local documentation page to:
 
 This integration can be installed through HACS as a custom repository.
 
-[![Open your Home Assistant instance and show this repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=mesh-forecaster&repository=ha-integration&category=integration)
+[![Open your Home Assistant instance and show this repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=OrlentTechnologies&repository=HorizonIQ&category=integration)
 
 1. Open HACS in Home Assistant.
 2. Go to `Integrations`.
 3. Open the menu and select `Custom repositories`.
-4. Add `https://github.com/mesh-forecaster/ha-integration`.
+4. Add `https://github.com/OrlentTechnologies/HorizonIQ`.
 5. Select `Integration` as the category.
-6. Install `Mesh Solar`.
+6. Install `HorizonIQ`.
 7. Restart Home Assistant.
-8. Go to `Settings` > `Devices & services` > `Add integration` and search for `Mesh Solar`.
+8. Go to `Settings` > `Devices & services` > `Add integration` and search for `HorizonIQ`.
 
 ### Manual
 
-1. Copy `custom_components/mesh_solar` from this repository into the `custom_components` directory in your Home Assistant configuration directory.
+1. Copy `custom_components/horizoniq` from this repository into the `custom_components` directory in your Home Assistant configuration directory.
 2. Restart Home Assistant.
-3. Go to `Settings` > `Devices & services` > `Add integration` and search for `Mesh Solar`.
+3. Go to `Settings` > `Devices & services` > `Add integration` and search for `HorizonIQ`.
 
 ## What This Integration Does
 
@@ -34,6 +36,7 @@ This integration can be installed through HACS as a custom repository.
 - Sends your current battery capacity, plus cached forecast `hash` and `registration_data`, to reduce payload churn.
 - Exposes import/export mode, monetary values, forecast diagnostics, and BMS state as entities.
 - Provides a `Clear Registration` button that clears cached registration data and refreshes immediately.
+- Keeps Test Mode portal redirects on the same selected portal host for sign-in, subscribe, and repair links.
 
 ## Configuration Fields
 
@@ -48,15 +51,15 @@ These are available in `Add Integration` and in `Configure` for existing entries
 | `environment` | No | `Live` or `Sandbox`. `Live` is stored internally as an empty value. |
 | `hash` | No | Deterministic result of the most recent forecast, sent as the `hash` query value. Usually managed automatically. |
 | `registration_data` | No | Registration data for your site, sent as `registrationData` so it is not constantly reloaded from the database. It refreshes daily or when you force refresh with the button. |
-| `forecast_device_id` | No | Canonical device ID for app-owned trial binding, sent as `X-Mesh-Device-Id` when set. Victron/Home Assistant setups usually use the GX device ID. |
-| `forecast_device_token` | No | Portal-generated app trial device token, sent as `X-Mesh-Device-Token` when set. |
+| `forecast_device_id` | No | Canonical device ID for app-owned trial binding, sent as `X-HorizonIQ-Device-Id` when set. Victron/Home Assistant setups usually use the GX device ID. |
+| `forecast_device_token` | No | Portal-generated app trial device token, sent as `X-HorizonIQ-Device-Token` when set. |
 
 ## Entities Created
 
 ### Binary Sensors
 
-- `Mesh Solar Import`
-- `Mesh Solar Export`
+- `HorizonIQ Import`
+- `HorizonIQ Export`
 
 Behavior:
 - `Import` is on when API response contains `shouldImport = true`.
@@ -64,12 +67,12 @@ Behavior:
 
 ### Sensors
 
-- `Mesh Solar Total Cost` (monetary)
-- `Mesh Solar Charging Cost` (monetary)
-- `Mesh Solar Saving` (monetary)
-- `Mesh Solar Forecast Diagnostics` (diagnostic)
-- `Mesh Solar BMS State`
-- `Mesh Solar Trial Status` (diagnostic)
+- `HorizonIQ Total Cost` (monetary)
+- `HorizonIQ Charging Cost` (monetary)
+- `HorizonIQ Saving` (monetary)
+- `HorizonIQ Forecast Diagnostics` (diagnostic)
+- `HorizonIQ BMS State`
+- `HorizonIQ Trial Status` (diagnostic)
 
 Behavior:
 - Monetary sensors read values from API payload keys like `TotalCost`, `ChargingCost`, `Saving`.
@@ -80,7 +83,7 @@ Behavior:
 
 ### Button
 
-- `Mesh Solar Clear Registration`
+- `HorizonIQ Clear Registration`
 
 Behavior:
 - Clears stored `registration_data` in the config entry.
@@ -103,8 +106,8 @@ The Home Assistant Installation ID shown in the config/options flow is read from
 | `environment` | Labels entities and keeps environment mode. | Set by user in config/options flow. |
 | `hash` | Deterministic result of the most recent forecast, sent as `hash`. | Updated from API response (`hash`/variants). |
 | `registration_data` | Site registration data sent as `registrationData` to avoid constant database reloads. | Refreshed daily by upstream behavior, editable in options, and force-refreshable via button. |
-| `forecast_device_id` | Optional device binding header `X-Mesh-Device-Id` for app-owned trials. | Set by user in config/options flow. Defaults from `gx_device_id` on legacy/external entries when present. |
-| `forecast_device_token` | Optional device binding header `X-Mesh-Device-Token` for app-owned trials. | Set by user in config/options flow. |
+| `forecast_device_id` | Optional device binding header `X-HorizonIQ-Device-Id` for app-owned trials. | Set by user in config/options flow. Defaults from `gx_device_id` on legacy/external entries when present. |
+| `forecast_device_token` | Optional device binding header `X-HorizonIQ-Device-Token` for app-owned trials. | Set by user in config/options flow. |
 
 ### Runtime-only (not persisted)
 
@@ -123,8 +126,10 @@ Each poll includes:
 - `registrationData`
 
 App-owned trials can also send optional request headers:
-- `X-Mesh-Device-Id`
-- `X-Mesh-Device-Token`
+- `X-HorizonIQ-Device-Id`
+- `X-HorizonIQ-Device-Token`
+
+Those header names still use the legacy HorizonIQ contract and are expected.
 
 These values are never sent as query parameters. Paid subscriptions and Stripe/provider trialing subscriptions can leave them empty.
 
@@ -140,7 +145,7 @@ The integration does not decrypt `registrationData`. If the backend sends `regis
 
 ## License
 
-Mesh Solar is licensed under the GNU General Public License, version 3 or later. See `LICENSE`.
+HorizonIQ is licensed under the GNU General Public License, version 3 or later. See `LICENSE`.
 
 ## Release Checklist
 
@@ -148,6 +153,6 @@ Before publishing a HACS release:
 
 - Confirm the GitHub repository is public, has a description, has topics, and has issues enabled.
 - Run and pass the HACS validation, Hassfest, and test workflows.
-- Update `custom_components/mesh_solar/manifest.json` with the release version.
+- Update `custom_components/horizoniq/manifest.json` with the release version.
 - Create a GitHub release, not only a tag, for the same version.
 - Add a repository license before wider distribution.

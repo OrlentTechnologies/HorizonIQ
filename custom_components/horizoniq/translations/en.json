@@ -1,0 +1,102 @@
+{
+  "title": "HorizonIQ",
+  "config": {
+    "error": {
+      "invalid_url": "Enter a valid HTTP or HTTPS URL.",
+      "invalid_entity_id": "Enter a valid entity ID.",
+      "required": "This field is required.",
+      "service_unavailable": "HorizonIQ is temporarily unavailable. Try again shortly."
+    },
+    "abort": {
+      "bootstrap_failed": "HorizonIQ could not validate your subscription.",
+      "oauth_implementation_unavailable": "HorizonIQ sign-in is not configured.",
+      "oauth_unauthorized": "HorizonIQ sign-in was rejected.",
+      "service_unavailable": "HorizonIQ is temporarily unavailable.",
+      "subscription_required": "A HorizonIQ trial or subscription is required before forecasting can start.",
+      "trial_start_failed": "HorizonIQ could not start the trial.",
+      "reauth_successful": "HorizonIQ sign-in was refreshed."
+    },
+    "step": {
+      "user": {
+        "title": "Connect HorizonIQ",
+        "description": "No subscription connected. Sign in or create an account to connect this Home Assistant installation. Forecasting starts only when you have an active trial or subscription.",
+        "data": {
+          "home_assistant_installation_id": "Home Assistant installation ID",
+          "action": "Action",
+          "battery_capacity_sensor": "Battery capacity sensor",
+          "test_mode": "Test Mode",
+          "portal_connection_url": "Sandbox portal connect URL"
+        },
+        "data_description": {
+          "home_assistant_installation_id": "This installation ID is sent to HorizonIQ as the device ID for this Home Assistant installation.",
+          "battery_capacity_sensor": "Entity ID that provides current battery capacity.",
+          "test_mode": "Use a sandbox HorizonIQ portal instead of production.",
+          "portal_connection_url": "Required only in Test Mode. Enter the full sandbox /portal/horizoniq/connect URL."
+        }
+      },
+      "no_subscription": {
+        "title": "No subscription connected",
+        "description": "HorizonIQ returned `{reason}` for Home Assistant installation `{installation_id}`. Subscribe at {subscribe_url}, start a trial if available, then check again or reconnect the integration. Signing in and checking again will not start a trial.",
+        "data": {
+          "home_assistant_installation_id": "Home Assistant installation ID",
+          "action": "Action"
+        },
+        "data_description": {
+          "home_assistant_installation_id": "Copy this device ID if support needs to check the subscription or trial state for this Home Assistant installation."
+        }
+      },
+      "confirm_start_trial": {
+        "title": "Start 14-day trial",
+        "description": "Starting the trial begins your 14-day period immediately. The trial cannot be restarted for this account or Home Assistant installation.",
+        "data": {
+          "confirm_start_trial": "I understand. Start the trial now."
+        }
+      }
+    }
+  },
+  "options": {
+    "error": {
+      "invalid_url": "Enter a valid HTTP or HTTPS URL.",
+      "invalid_entity_id": "Enter a valid entity ID.",
+      "required": "This field is required."
+    },
+    "step": {
+      "init": {
+        "title": "HorizonIQ settings",
+        "description": "Edit HorizonIQ connection values and cached tokens.",
+        "data": {
+          "home_assistant_installation_id": "Home Assistant Installation ID",
+          "url": "Forecast URL",
+          "api_key": "API key",
+          "battery_capacity_sensor": "Battery capacity sensor",
+          "environment": "Environment",
+          "hash": "Forecast hash",
+          "registration_data": "Registration data",
+          "forecast_device_id": "Forecast device ID",
+          "forecast_device_token": "Forecast device token"
+        },
+        "data_description": {
+          "home_assistant_installation_id": "Read-only identifier for this Home Assistant installation.",
+          "url": "Forecast endpoint URL.",
+          "api_key": "API key sent as X-API-KEY.",
+          "battery_capacity_sensor": "Entity ID that provides current battery capacity.",
+          "environment": "Use Live or Sandbox.",
+          "hash": "Deterministic result of the most recent forecast.",
+          "registration_data": "Cached registration data returned by the forecast endpoint.",
+          "forecast_device_id": "Optional canonical device ID for app trial binding.",
+          "forecast_device_token": "Optional portal-generated trial device token. Sent only as X-HorizonIQ-Device-Token."
+        }
+      }
+    }
+  },
+  "issues": {
+    "entitlement_lost": {
+      "title": "HorizonIQ subscription required",
+      "description": "Your HorizonIQ trial or subscription is no longer valid. Subscribe at {subscribe_url}, then reload or reconnect the integration."
+    },
+    "forecast_credential_refresh": {
+      "title": "HorizonIQ forecast credentials could not be refreshed",
+      "description": "Home Assistant could not refresh HorizonIQ forecast credentials. Forecasting will continue with the last known good credentials until a valid no-subscription response is returned."
+    }
+  }
+}
