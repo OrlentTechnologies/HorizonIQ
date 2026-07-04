@@ -36,7 +36,7 @@
       },
       "no_subscription": {
         "title": "No subscription connected",
-        "description": "HorizonIQ returned `{reason}` for Home Assistant installation `{installation_id}`. Subscribe at {subscribe_url}, start a trial if available, then check again or reconnect the integration. Signing in and checking again will not start a trial.",
+        "description": "HorizonIQ returned `{reason}` for Home Assistant installation `{installation_id}`. Open the billing page in a new tab: [Subscribe here]({subscribe_url}) ({subscribe_url}). Start a trial if available, then check again or reconnect the integration. Signing in and checking again will not start a trial.",
         "data": {
           "home_assistant_installation_id": "Home Assistant installation ID",
           "action": "Action"

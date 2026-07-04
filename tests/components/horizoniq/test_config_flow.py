@@ -16,7 +16,6 @@ from custom_components.horizoniq.const import (
     ACTION_CREATE_ACCOUNT,
     ACTION_SIGN_IN,
     ACTION_START_TRIAL,
-    ACTION_SUBSCRIBE,
     CONF_API_KEY,
     CONF_BATTERY_CAPACITY_SENSOR,
     CONF_ENVIRONMENT,
@@ -321,7 +320,7 @@ def test_no_subscription_schema_shows_device_id_and_start_trial() -> None:
 
 
 def test_no_subscription_schema_hides_start_trial_when_trial_used() -> None:
-    """Used-trial/no-subscription state only allows checking again or subscribing."""
+    """Used-trial/no-subscription state only allows checking again."""
     bootstrap = _bootstrap_no_subscription(
         reason="no_subscription",
         trial_eligible=False,
@@ -333,6 +332,8 @@ def test_no_subscription_schema_hides_start_trial_when_trial_used() -> None:
     assert defaults["action"] == ACTION_CHECK_AGAIN
     with pytest.raises(vol.Invalid):
         schema({"action": ACTION_START_TRIAL})
+    with pytest.raises(vol.Invalid):
+        schema({"action": "subscribe"})
     assert _no_subscription_placeholders(bootstrap)["reason"] == "no_subscription"
     assert (
         _no_subscription_placeholders(bootstrap)["subscribe_url"]
@@ -340,8 +341,10 @@ def test_no_subscription_schema_hides_start_trial_when_trial_used() -> None:
     )
 
 
-async def test_no_subscription_subscribe_redirects_to_billing_portal(hass) -> None:
-    """Subscribe action opens billing through Home Assistant's flow manager."""
+async def test_no_subscription_form_keeps_active_billing_url_in_description(
+    hass,
+) -> None:
+    """The no-subscription form advertises the active billing URL without an action."""
 
     async def fake_begin_oauth(flow: HorizonIQConfigFlow):
         flow._bootstrap = _bootstrap_no_subscription(
@@ -375,26 +378,15 @@ async def test_no_subscription_subscribe_redirects_to_billing_portal(hass) -> No
 
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "no_subscription"
-
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"],
-        user_input={"action": ACTION_SUBSCRIBE},
-    )
-
-    assert result["type"] == FlowResultType.EXTERNAL_STEP
-    assert result["step_id"] == ACTION_SUBSCRIBE
-    assert result["url"] == PORTAL_BILLING_URL
-
-    result = await hass.config_entries.flow.async_configure(result["flow_id"])
-
-    assert result["type"] == FlowResultType.EXTERNAL_STEP_DONE
-    assert result["step_id"] == "no_subscription"
+    defaults = result["data_schema"]({})
+    assert defaults["action"] == ACTION_CHECK_AGAIN
+    assert result["description_placeholders"]["subscribe_url"] == PORTAL_BILLING_URL
 
 
-async def test_no_subscription_subscribe_redirects_to_test_mode_billing_portal(
+async def test_no_subscription_form_keeps_test_mode_billing_url_in_description(
     hass, monkeypatch
 ) -> None:
-    """Test Mode subscribe stays on the same selected portal host."""
+    """Test Mode no-subscription form keeps the selected portal billing host."""
     monkeypatch.setenv("HORIZONIQ_DEVELOPER_MODE", "1")
     portal_connection_url = "https://sandbox.example.test/portal/horizoniq/connect"
 
@@ -436,14 +428,7 @@ async def test_no_subscription_subscribe_redirects_to_test_mode_billing_portal(
         "https://sandbox.example.test/portal/billing"
     )
 
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"],
-        user_input={"action": ACTION_SUBSCRIBE},
-    )
 
-    assert result["type"] == FlowResultType.EXTERNAL_STEP
-    assert result["step_id"] == ACTION_SUBSCRIBE
-    assert result["url"] == "https://sandbox.example.test/portal/billing"
 
 
 def test_trial_bootstrap_creates_forecast_entry_with_trial_cadence() -> None:

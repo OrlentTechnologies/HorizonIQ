@@ -8,9 +8,7 @@ from urllib.parse import urlparse, urlunparse
 from aiohttp import ClientError, ClientSession, ContentTypeError
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.config_entry_oauth2_flow import (
-    LocalOAuth2ImplementationWithPkce,
-)
+from homeassistant.helpers.config_entry_oauth2_flow import LocalOAuth2ImplementationWithPkce
 
 from .const import PORTAL_CONNECT_URL, PORTAL_RUNTIME_CONFIG_URL, REQUEST_TIMEOUT_SECONDS
 from .portal import normalize_portal_connection_url

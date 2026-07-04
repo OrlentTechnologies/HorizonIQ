@@ -35,7 +35,6 @@ from .const import (
     ACTION_CREATE_ACCOUNT,
     ACTION_SIGN_IN,
     ACTION_START_TRIAL,
-    ACTION_SUBSCRIBE,
     CONF_API_KEY,
     CONF_BATTERY_CAPACITY_SENSOR,
     CONF_ENVIRONMENT,
@@ -270,14 +269,9 @@ class HorizonIQConfigFlow(
                         await self._async_bootstrap_with_trial_token_recovery()
                     )
                 except HorizonIQApiTransientError:
-                    return self.async_show_form(
-                        step_id="no_subscription",
-                        data_schema=_no_subscription_schema(bootstrap),
+                    return self._show_no_subscription_form(
+                        bootstrap=bootstrap,
                         errors={"base": "service_unavailable"},
-                        description_placeholders=_no_subscription_placeholders(
-                            bootstrap,
-                            subscribe_url=self._active_billing_url(),
-                        ),
                     )
                 if self._bootstrap.entitled:
                     return self._async_create_or_update_entitled_entry(self._bootstrap)
@@ -286,32 +280,12 @@ class HorizonIQConfigFlow(
             if action == ACTION_START_TRIAL and bootstrap.trial and bootstrap.trial.eligible:
                 return await self.async_step_confirm_start_trial()
 
-            if action == ACTION_SUBSCRIBE:
-                return self.async_external_step(
-                    step_id=ACTION_SUBSCRIBE,
-                    url=self._active_billing_url(),
-                )
-
             return self.async_abort(reason="subscription_required")
 
-        return self.async_show_form(
-            step_id="no_subscription",
-            data_schema=_no_subscription_schema(bootstrap),
+        return self._show_no_subscription_form(
+            bootstrap=bootstrap,
             errors={},
-            description_placeholders=_no_subscription_placeholders(
-                bootstrap,
-                subscribe_url=self._active_billing_url(),
-            ),
         )
-
-    async def async_step_subscribe(
-        self, user_input: dict[str, object] | None = None
-    ) -> ConfigFlowResult:
-        """Return to subscription checking after opening the billing portal."""
-        if user_input is None:
-            return self.async_external_step_done(next_step_id="no_subscription")
-
-        return await self.async_step_no_subscription(user_input)
 
     async def async_step_confirm_start_trial(
         self, user_input: dict[str, object] | None = None
@@ -438,6 +412,23 @@ class HorizonIQConfigFlow(
         """Return the billing portal for the active flow runtime."""
         return billing_url_from_portal_connection_url(self._portal_connection_url)
 
+    def _show_no_subscription_form(
+        self,
+        *,
+        bootstrap: BootstrapData,
+        errors: dict[str, str] | None = None,
+    ) -> ConfigFlowResult:
+        """Build the no-subscription form."""
+        return self.async_show_form(
+            step_id="no_subscription",
+            data_schema=_no_subscription_schema(bootstrap),
+            errors=errors or {},
+            description_placeholders=_no_subscription_placeholders(
+                bootstrap,
+                subscribe_url=self._active_billing_url(),
+            ),
+        )
+
 
 class HorizonIQOptionsFlow(config_entries.OptionsFlow):
     """Handle HorizonIQ options."""
@@ -511,7 +502,7 @@ def _entry_data_from_bootstrap(
 
 
 def _no_subscription_schema(bootstrap: BootstrapData) -> vol.Schema:
-    actions = {ACTION_CHECK_AGAIN: "Check Again", ACTION_SUBSCRIBE: "Subscribe"}
+    actions = {ACTION_CHECK_AGAIN: "Check Again"}
     if bootstrap.trial and bootstrap.trial.eligible:
         actions = {ACTION_START_TRIAL: "Start Trial", **actions}
     return vol.Schema(
