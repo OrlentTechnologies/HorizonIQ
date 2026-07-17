@@ -213,19 +213,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         initial_registration=config_data[CONF_REGISTRATION_DATA],
         credential_refresh=credential_refresh,
     )
-    try:
-        await coordinator.async_config_entry_first_refresh()
-    except ConfigEntryNotReady as err:
-        _LOGGER.warning(
-            "Initial refresh failed for entry %s; Home Assistant will retry setup. "
-            "Error: %s",
-            entry.entry_id,
-            err,
-        )
-        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
-        raise
-
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    await coordinator.async_refresh()
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
@@ -358,6 +347,9 @@ async def _async_refresh_bootstrap_now(
         environment=str(entry.data.get(CONF_ENVIRONMENT, "")),
         device_token=str(entry.data.get(CONF_FORECAST_DEVICE_TOKEN, "")).strip()
         or None,
+    )
+    updated[CONF_REGISTRATION_DATA] = str(
+        entry.data.get(CONF_REGISTRATION_DATA, "") or ""
     )
     hass.config_entries.async_update_entry(entry, data={**entry.data, **updated})
     return True

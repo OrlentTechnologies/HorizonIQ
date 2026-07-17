@@ -26,12 +26,12 @@ from .const import (
     DEFAULT_FORECAST_CADENCE_MINUTES,
     DOMAIN,
     EXACT_SUBSCRIPTION_FAILURE_BODY,
-    FAILED_REFRESH_RETRY_SECONDS,
     HEADER_API_KEY,
     HEADER_FORECAST_DEVICE_ID,
     HEADER_FORECAST_DEVICE_TOKEN,
     ISSUE_ENTITLEMENT_LOST,
     ISSUE_FORECAST_CREDENTIAL_REFRESH,
+    INITIAL_FORECAST_RETRY_SECONDS,
     REQUEST_TIMEOUT_SECONDS,
     SUBSCRIPTION_STATUS_NO_SUBSCRIPTION,
     normalize_environment,
@@ -82,6 +82,8 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         self._effective_forecast_cadence_minutes = (
             self._forecast_cadence_minutes or DEFAULT_FORECAST_CADENCE_MINUTES
         )
+        self._has_successful_forecast = False
+        self._initial_forecast_failures = 0
         self._latest_snapshot = HorizonIQSnapshot()
         self.environment = normalize_environment(environment)
         super().__init__(
@@ -150,11 +152,15 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         except UpdateFailed as err:
             if str(err) == EXACT_SUBSCRIPTION_FAILURE_BODY:
                 raise
+            if self._has_successful_forecast:
+                raise
             raise UpdateFailed(
                 str(err),
-                retry_after=FAILED_REFRESH_RETRY_SECONDS,
+                retry_after=self._next_initial_forecast_retry_seconds(),
             ) from err
         snapshot = build_snapshot(payload)
+        self._has_successful_forecast = True
+        self._initial_forecast_failures = 0
         if snapshot.forecast_cadence_minutes is not None:
             self._set_forecast_cadence_minutes(snapshot.forecast_cadence_minutes)
         self._latest_snapshot = snapshot
@@ -168,6 +174,18 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
             len(snapshot.forecast_periods),
         )
         return snapshot
+
+    def _next_initial_forecast_retry_seconds(self) -> int:
+        """Return the next retry delay before the first successful forecast."""
+        retry_index = min(
+            self._initial_forecast_failures,
+            len(INITIAL_FORECAST_RETRY_SECONDS) - 1,
+        )
+        self._initial_forecast_failures = min(
+            retry_index + 1,
+            len(INITIAL_FORECAST_RETRY_SECONDS),
+        )
+        return INITIAL_FORECAST_RETRY_SECONDS[retry_index]
 
     @property
     def _current_snapshot(self) -> HorizonIQSnapshot:

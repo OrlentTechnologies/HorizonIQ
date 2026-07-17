@@ -13,11 +13,11 @@ from custom_components.horizoniq.const import (
     CONF_SUBSCRIPTION_STATUS,
     CONF_URL,
     EXACT_SUBSCRIPTION_FAILURE_BODY,
-    FAILED_REFRESH_RETRY_SECONDS,
     HEADER_API_KEY,
     SANDBOX_ENVIRONMENT,
     HEADER_FORECAST_DEVICE_ID,
     HEADER_FORECAST_DEVICE_TOKEN,
+    INITIAL_FORECAST_RETRY_SECONDS,
     SUBSCRIPTION_STATUS_NO_SUBSCRIPTION,
 )
 from custom_components.horizoniq.coordinator import HorizonIQCoordinator
@@ -160,6 +160,38 @@ async def test_clear_registration_data_persists_and_refreshes(
     assert coordinator.update_interval == timedelta(minutes=5)
     assert mock_config_entry.data[CONF_REGISTRATION_DATA] == ""
     coordinator.async_request_refresh.assert_awaited_once()
+
+
+async def test_clear_registration_data_preserves_hash_and_makes_one_request(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+    aioclient_mock,
+) -> None:
+    """The explicit refresh clears registration data without repeating a forecast."""
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "53")
+    coordinator = HorizonIQCoordinator(
+        hass,
+        mock_config_entry,
+        entry_data["url"],
+        entry_data["api_key"],
+        entry_data["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+        initial_hash="existing-hash",
+        initial_registration="existing-registration",
+    )
+    cleared_url = coordinator._build_request_url("53").replace(
+        "registrationData=existing-registration", "registrationData="
+    )
+    aioclient_mock.get(cleared_url, json={})
+
+    await coordinator.async_clear_registration_data()
+
+    assert coordinator.last_hash == "existing-hash"
+    assert coordinator.registration_data == ""
+    assert mock_config_entry.data[CONF_HASH] == "existing-hash"
+    assert mock_config_entry.data[CONF_REGISTRATION_DATA] == ""
+    assert len(aioclient_mock.mock_calls) == 1
 
 
 async def test_forecast_request_sends_trial_headers_when_configured(
@@ -411,13 +443,12 @@ async def test_coordinator_uses_diagnostic_payload_from_plain_unauthorized_respo
     assert snapshot.forecast_periods == []
 
 
-async def test_coordinator_failed_refresh_requests_one_minute_retry(
+async def test_coordinator_initial_failures_follow_retry_schedule(
     hass,
     mock_config_entry,
     entry_data: dict[str, str],
-    aioclient_mock,
 ) -> None:
-    """Refresh failures ask Home Assistant to retry after one minute."""
+    """Initial forecast failures use the coordinator-owned retry schedule."""
     hass.states.async_set(entry_data["battery_capacity_sensor"], "53")
 
     coordinator = HorizonIQCoordinator(
@@ -429,12 +460,88 @@ async def test_coordinator_failed_refresh_requests_one_minute_retry(
         SANDBOX_ENVIRONMENT,
     )
 
-    aioclient_mock.get(coordinator._build_request_url("53"), status=500)
+    coordinator._fetch_payload = AsyncMock(  # type: ignore[method-assign]
+        side_effect=UpdateFailed("API returned status 500")
+    )
+
+    retry_delays = []
+    for _ in range(len(INITIAL_FORECAST_RETRY_SECONDS) + 2):
+        with pytest.raises(UpdateFailed) as exc_info:
+            await coordinator._async_update_data()
+        retry_delays.append(exc_info.value.retry_after)
+
+    assert retry_delays == [*INITIAL_FORECAST_RETRY_SECONDS, 480, 480]
+
+
+@pytest.mark.parametrize("status", [500, 429])
+async def test_coordinator_initial_http_failures_make_one_request_and_ignore_retry_after(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+    aioclient_mock,
+    status: int,
+) -> None:
+    """HTTP failures are scheduled once by the coordinator, not by the server."""
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "53")
+    coordinator = HorizonIQCoordinator(
+        hass,
+        mock_config_entry,
+        entry_data["url"],
+        entry_data["api_key"],
+        entry_data["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+    )
+    request_url = coordinator._build_request_url("53")
+    aioclient_mock.get(
+        request_url,
+        status=status,
+        headers={"Retry-After": "3600"},
+    )
 
     with pytest.raises(UpdateFailed) as exc_info:
         await coordinator._async_update_data()
 
-    assert exc_info.value.retry_after == FAILED_REFRESH_RETRY_SECONDS
+    assert exc_info.value.retry_after == INITIAL_FORECAST_RETRY_SECONDS[0]
+    assert len(aioclient_mock.mock_calls) == 1
+
+
+async def test_coordinator_success_resets_initial_retry_state_and_later_uses_cadence(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+    aioclient_mock,
+) -> None:
+    """A successful forecast switches failures to the backend cadence."""
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "53")
+    coordinator = HorizonIQCoordinator(
+        hass,
+        mock_config_entry,
+        entry_data["url"],
+        entry_data["api_key"],
+        entry_data["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+    )
+    request_url = coordinator._build_request_url("53")
+    aioclient_mock.get(request_url, status=500)
+
+    with pytest.raises(UpdateFailed) as exc_info:
+        await coordinator._async_update_data()
+    assert exc_info.value.retry_after == INITIAL_FORECAST_RETRY_SECONDS[0]
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(request_url, json={"forecastCadenceMinutes": 17})
+    await coordinator._async_update_data()
+
+    assert coordinator._has_successful_forecast is True
+    assert coordinator._initial_forecast_failures == 0
+    assert coordinator.update_interval == timedelta(minutes=17)
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(request_url, status=500)
+    with pytest.raises(UpdateFailed) as exc_info:
+        await coordinator._async_update_data()
+
+    assert exc_info.value.retry_after is None
 
 
 async def test_exact_subscription_failure_stops_polling_and_clears_cache(

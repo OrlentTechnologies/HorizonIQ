@@ -142,7 +142,7 @@ class HorizonIQConfigFlow(
 
     @property
     def extra_authorize_data(self) -> dict[str, str]:
-        """Attach portal routing data after the OAuth helper adds state and PKCE."""
+        """Attach integration-owned routing context to the portal authorization URL."""
         return {
             "installationId": self._installation_id,
             "mode": self._mode,

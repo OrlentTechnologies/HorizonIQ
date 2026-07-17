@@ -149,6 +149,9 @@ async def test_user_flow_create_account_generates_portal_oauth_url(hass) -> None
     assert params["installationId"] == [
         "76d85cbc-5a44-4e41-88f7-f02f41562f15"
     ]
+    assert params["mode"] == [ACTION_CREATE_ACCOUNT]
+    assert "prompt" not in params
+    assert "max_age" not in params
     assert params["code_challenge_method"] == ["S256"]
     assert "code_challenge" in params
     assert "state" in params

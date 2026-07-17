@@ -90,7 +90,7 @@ async def test_async_setup_entry_creates_coordinator_and_forwards_platforms(
 ) -> None:
     """A valid entry creates the coordinator and forwards platform setup."""
     coordinator = MagicMock()
-    coordinator.async_config_entry_first_refresh = AsyncMock()
+    coordinator.async_refresh = AsyncMock()
 
     with (
         patch("custom_components.horizoniq._ensure_local_docs", AsyncMock()) as mock_docs,
@@ -126,15 +126,13 @@ async def test_async_setup_entry_creates_coordinator_and_forwards_platforms(
     mock_forward.assert_awaited_once_with(mock_config_entry, PLATFORMS)
 
 
-async def test_async_setup_entry_retries_when_initial_refresh_fails(
+async def test_async_setup_entry_completes_when_initial_refresh_fails(
     hass,
     mock_config_entry,
 ) -> None:
-    """Initial refresh failures keep the config entry retryable."""
+    """Initial refresh failures leave unavailable entities and load the entry."""
     coordinator = MagicMock()
-    coordinator.async_config_entry_first_refresh = AsyncMock(
-        side_effect=ConfigEntryNotReady("api unavailable")
-    )
+    coordinator.async_refresh = AsyncMock()
 
     with (
         patch("custom_components.horizoniq._ensure_local_docs", AsyncMock()),
@@ -148,12 +146,35 @@ async def test_async_setup_entry_retries_when_initial_refresh_fails(
             AsyncMock(return_value=True),
         ) as mock_forward,
     ):
-        with pytest.raises(ConfigEntryNotReady):
-            await async_setup_entry(hass, mock_config_entry)
+        result = await async_setup_entry(hass, mock_config_entry)
 
-    coordinator.async_config_entry_first_refresh.assert_awaited_once()
-    mock_forward.assert_not_awaited()
-    assert mock_config_entry.entry_id not in hass.data.get(DOMAIN, {})
+    assert result is True
+    coordinator.async_refresh.assert_awaited_once()
+    mock_forward.assert_awaited_once_with(mock_config_entry, PLATFORMS)
+    assert hass.data[DOMAIN][mock_config_entry.entry_id] is coordinator
+
+
+async def test_async_setup_entry_loads_unavailable_entities_after_initial_failure(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+    aioclient_mock,
+) -> None:
+    """An unavailable forecast does not prevent entity setup."""
+    hass.states.async_set(entry_data[CONF_BATTERY_CAPACITY_SENSOR], "53")
+    aioclient_mock.get(
+        "https://example.com/api/Forecast_Get?code=test-code"
+        "&currentBatteryCapacity=53&hash=&registrationData=",
+        status=500,
+    )
+
+    with patch("custom_components.horizoniq._ensure_local_docs", AsyncMock()):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    assert coordinator.last_update_success is False
+    assert hass.states.get("sensor.horizoniq_total_cost").state == "unavailable"
 
 
 async def test_async_setup_entry_stops_before_forecasting_when_no_subscription(
@@ -429,7 +450,7 @@ async def test_async_setup_entry_migrates_legacy_live_unique_ids(
     assert legacy_button.entity_id == "button.horizoniq_clear_registration"
 
     coordinator = MagicMock()
-    coordinator.async_config_entry_first_refresh = AsyncMock()
+    coordinator.async_refresh = AsyncMock()
 
     with (
         patch("custom_components.horizoniq._ensure_local_docs", AsyncMock()),
@@ -494,7 +515,7 @@ async def test_async_setup_entry_migrates_legacy_live_unique_ids_from_stale_entr
     assert duplicate_sensor.entity_id == "sensor.horizoniq_forecast_diagnostics_2"
 
     coordinator = MagicMock()
-    coordinator.async_config_entry_first_refresh = AsyncMock()
+    coordinator.async_refresh = AsyncMock()
 
     with (
         patch("custom_components.horizoniq._ensure_local_docs", AsyncMock()),
@@ -556,7 +577,7 @@ async def test_async_setup_entry_renames_current_duplicate_entity_id_when_legacy
     )
 
     coordinator = MagicMock()
-    coordinator.async_config_entry_first_refresh = AsyncMock()
+    coordinator.async_refresh = AsyncMock()
 
     with (
         patch("custom_components.horizoniq._ensure_local_docs", AsyncMock()),
@@ -615,7 +636,7 @@ async def test_async_setup_entry_collapses_stale_live_entry_id_family(
     assert current_entry_registry.entity_id == "sensor.horizoniq_forecast_diagnostics_2"
 
     coordinator = MagicMock()
-    coordinator.async_config_entry_first_refresh = AsyncMock()
+    coordinator.async_refresh = AsyncMock()
 
     with (
         patch("custom_components.horizoniq._ensure_local_docs", AsyncMock()),
