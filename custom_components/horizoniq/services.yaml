@@ -152,7 +152,7 @@ fault_configure:
           mode: box
     settings:
       required: false
-      description: Required only for `delay_mqtt`: `{delay_seconds: 0.1..60}`. All other fault kinds reject settings.
+      description: "Required only for `delay_mqtt`: `{delay_seconds: 0.1..60}`. All other fault kinds reject settings."
       selector:
         object:
     activate:
