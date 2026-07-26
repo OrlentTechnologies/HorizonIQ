@@ -63,6 +63,7 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         initial_hash: str | None = None,
         initial_registration: str | None = None,
         credential_refresh: Callable[[], Awaitable[bool]] | None = None,
+        battery_capacity_provider: Callable[[], str] | None = None,
     ) -> None:
         self._hass = hass
         self._entry = entry
@@ -72,6 +73,7 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         self._forecast_device_token = forecast_device_token.strip()
         self._forecast_function_key = forecast_function_key.strip()
         self._battery_capacity_sensor = battery_capacity_sensor
+        self._battery_capacity_provider = battery_capacity_provider
         self._session = async_get_clientsession(hass)
         self._last_hash = (initial_hash or "").strip()
         self._registration_data = (initial_registration or "").strip()
@@ -86,6 +88,7 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         self._initial_forecast_failures = 0
         self._latest_snapshot = HorizonIQSnapshot()
         self.environment = normalize_environment(environment)
+        self._sandbox_paused = False
         super().__init__(
             hass,
             _LOGGER,
@@ -93,6 +96,23 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
             name=DOMAIN,
             update_interval=timedelta(minutes=self._effective_forecast_cadence_minutes),
         )
+
+    async def async_pause_for_sandbox(self) -> None:
+        """Suppress only this coordinator's cloud refreshes while simulated."""
+        self._sandbox_paused = True
+
+    async def async_resume_from_sandbox(self) -> None:
+        """Resume this coordinator once after sandbox simulation stops."""
+        if not self._sandbox_paused:
+            return
+        self._sandbox_paused = False
+        await self.async_request_refresh()
+
+    def set_battery_capacity_provider(
+        self, provider: Callable[[], str] | None
+    ) -> None:
+        """Set an entry-local source for the capacity sent to the forecaster."""
+        self._battery_capacity_provider = provider
 
     @property
     def last_hash(self) -> str:
@@ -136,6 +156,8 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
 
     async def _async_update_data(self) -> HorizonIQSnapshot:
         """Fetch the latest HorizonIQ data."""
+        if self._sandbox_paused:
+            return self._current_snapshot
         battery_capacity = self._current_battery_capacity()
         request_url = self._build_request_url(battery_capacity)
         _LOGGER.debug(
@@ -371,6 +393,9 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         return headers
 
     def _current_battery_capacity(self) -> str:
+        if self._battery_capacity_provider is not None:
+            return self._battery_capacity_provider()
+
         battery_state = self._hass.states.get(self._battery_capacity_sensor)
         if battery_state is None:
             _LOGGER.debug(

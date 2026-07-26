@@ -1,0 +1,191 @@
+load_profile:
+  name: Load sandbox profile
+  description: Validate and select a JSON or CSV replay profile owned by one sandbox entry.
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+    filename:
+      required: true
+      selector:
+        text:
+start_profile:
+  name: Start sandbox profile
+  description: Start deterministic playback of the selected profile for one active sandbox.
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+pause_profile:
+  name: Pause sandbox profile
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+stop_profile:
+  name: Stop sandbox profile
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+reset_profile:
+  name: Reset sandbox profile
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+step:
+  name: Step sandbox
+  description: Advance one active sandbox by a positive number of virtual seconds.
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+    seconds:
+      required: false
+      default: 1800
+      selector:
+        number:
+          min: 0.001
+          max: 86400
+          mode: box
+reset:
+  name: Reset sandbox
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+    energy_wh:
+      required: false
+      description: Must be between zero and 2,000,000 Wh and within the selected sandbox's reserve/capacity.
+      selector:
+        number:
+          min: 0
+          max: 2000000
+          mode: box
+snapshot_create:
+  name: Create sandbox snapshot
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+    name:
+      required: true
+      selector:
+        text:
+    replace:
+      required: false
+      selector:
+        boolean:
+snapshot_list:
+  name: List sandbox snapshots
+  description: Returns the names of snapshots owned by one sandbox entry.
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+snapshot_restore:
+  name: Restore sandbox snapshot
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+    name:
+      required: true
+      selector:
+        text:
+snapshot_delete:
+  name: Delete sandbox snapshot
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+    name:
+      required: true
+      selector:
+        text:
+fault_configure:
+  name: Configure sandbox fault
+  description: Configure and, by default, activate a bounded fault for one sandbox only.
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+    kind:
+      required: true
+      selector:
+        select:
+          options:
+            - stale_telemetry
+            - drop_mqtt
+            - delay_mqtt
+            - malformed_telemetry
+            - replay_api_failure
+            - reject_command
+            - mqtt_disconnect
+            - runtime_restart
+    remaining_count:
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 100
+          mode: box
+    remaining_duration_seconds:
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 900
+          mode: box
+    settings:
+      required: false
+      description: Required only for `delay_mqtt`: `{delay_seconds: 0.1..60}`. All other fault kinds reject settings.
+      selector:
+        object:
+    activate:
+      required: false
+      default: true
+      selector:
+        boolean:
+fault_activate:
+  name: Activate sandbox fault
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+    fault_id:
+      required: true
+      selector:
+        text:
+fault_clear:
+  name: Clear sandbox fault
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+    fault_id:
+      required: true
+      selector:
+        text:
+fault_clear_all:
+  name: Clear all sandbox faults
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:

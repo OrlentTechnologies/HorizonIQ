@@ -1,0 +1,32 @@
+# One copy of this section may be added for each HorizonIQ Sandbox entry.
+# Replace <entry-slug> with the entity-id suffix assigned by Home Assistant.
+type: conditional
+conditions:
+  - entity: switch.horizoniq_virtual_battery_simulation
+    state: "on"
+card:
+  type: entities
+  title: HorizonIQ sandbox — <entry-slug>
+  entities:
+    - switch.horizoniq_virtual_battery_simulation
+    - select.horizoniq_virtual_battery_simulation_clock_rate
+    - select.horizoniq_virtual_battery_scenario
+    - number.horizoniq_virtual_battery_load
+    - number.horizoniq_virtual_battery_solar_generation
+    - number.horizoniq_virtual_battery_battery_capacity
+    - number.horizoniq_virtual_battery_battery_reserve
+    - sensor.horizoniq_virtual_battery_state_of_charge
+    - sensor.horizoniq_virtual_battery_energy
+    - sensor.horizoniq_virtual_battery_battery_power
+    - sensor.horizoniq_virtual_battery_grid_power
+    - sensor.horizoniq_virtual_battery_virtual_time
+    - sensor.horizoniq_virtual_battery_mqtt_health
+    - sensor.horizoniq_virtual_battery_forecast_health
+    - sensor.horizoniq_virtual_battery_command_status
+    - sensor.horizoniq_virtual_battery_energy_balance_health
+    - sensor.horizoniq_virtual_battery_energy_balance_error
+    - sensor.horizoniq_virtual_battery_active_faults
+    - button.horizoniq_virtual_battery_step_simulation
+    - button.horizoniq_virtual_battery_reset_simulation
+    - button.horizoniq_virtual_battery_save_snapshot
+    - button.horizoniq_virtual_battery_inject_selected_fault

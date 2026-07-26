@@ -586,6 +586,7 @@ async def test_options_flow_updates_entry_data_and_clears_duplicate_options(hass
         CONF_REGISTRATION_DATA: "new-registration",
         CONF_FORECAST_DEVICE_ID: "gx-device-2",
         CONF_FORECAST_DEVICE_TOKEN: "new-trial-token",
+        "capacity_source": "external_entity",
     }
     assert CONF_HOME_ASSISTANT_INSTALLATION_ID not in entry.data
     assert entry.options == {}

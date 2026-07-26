@@ -1,7 +1,7 @@
 from homeassistant.const import Platform
 
 DOMAIN = "horizoniq"
-INTEGRATION_VERSION = "2.0.21"
+INTEGRATION_VERSION = "2.0.41"
 DEVELOPER_MODE_ENVIRONMENT_VARIABLE = "HORIZONIQ_DEVELOPER_MODE"
 TEST_URL_ENVIRONMENT_VARIABLE = "HORIZONIQ_TEST_URL"
 
@@ -31,6 +31,9 @@ CONF_BOOTSTRAP_REASON = "bootstrap_reason"
 CONF_MIGRATION_REQUIRED = "oauth_migration_required"
 CONF_TEST_MODE = "test_mode"
 CONF_PORTAL_CONNECTION_URL = "portal_connection_url"
+CONF_CAPACITY_SOURCE = "capacity_source"
+CAPACITY_SOURCE_EXTERNAL_ENTITY = "external_entity"
+CAPACITY_SOURCE_VIRTUAL_BATTERY = "virtual_battery"
 
 SUBSCRIPTION_STATUS_NO_SUBSCRIPTION = "no_subscription"
 SUBSCRIPTION_STATUS_TRIAL = "trial"
@@ -86,6 +89,9 @@ PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
     Platform.SENSOR,
     Platform.BUTTON,
+    Platform.NUMBER,
+    Platform.SWITCH,
+    Platform.SELECT,
 ]
 
 

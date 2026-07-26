@@ -162,6 +162,31 @@ async def test_clear_registration_data_persists_and_refreshes(
     coordinator.async_request_refresh.assert_awaited_once()
 
 
+async def test_sandbox_pause_prevents_forecast_http_after_initial_failure(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+) -> None:
+    """A paused sandbox never retries the cloud endpoint without prior data."""
+    coordinator = HorizonIQCoordinator(
+        hass,
+        mock_config_entry,
+        entry_data["url"],
+        entry_data["api_key"],
+        entry_data["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+    )
+    coordinator._fetch_payload = AsyncMock(  # type: ignore[method-assign]
+        side_effect=AssertionError("Sandbox pause must prevent HTTP")
+    )
+
+    await coordinator.async_pause_for_sandbox()
+    snapshot = await coordinator._async_update_data()
+
+    assert snapshot == HorizonIQSnapshot()
+    coordinator._fetch_payload.assert_not_awaited()
+
+
 async def test_clear_registration_data_preserves_hash_and_makes_one_request(
     hass,
     mock_config_entry,

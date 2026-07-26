@@ -21,7 +21,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up HorizonIQ binary sensors."""
-    coordinator = hass.data[DOMAIN][config_entry.entry_id]
+    coordinator = hass.data[DOMAIN][config_entry.entry_id].coordinator
     environment = normalized_environment(
         getattr(coordinator, "environment", DEFAULT_ENVIRONMENT)
     )

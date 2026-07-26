@@ -37,6 +37,9 @@ from .const import (
     ACTION_START_TRIAL,
     CONF_API_KEY,
     CONF_BATTERY_CAPACITY_SENSOR,
+    CAPACITY_SOURCE_EXTERNAL_ENTITY,
+    CAPACITY_SOURCE_VIRTUAL_BATTERY,
+    CONF_CAPACITY_SOURCE,
     CONF_ENVIRONMENT,
     CONF_FORECAST_DEVICE_ID,
     CONF_FORECAST_DEVICE_TOKEN,
@@ -81,7 +84,7 @@ def _developer_mode_enabled() -> bool:
 
 
 def _user_schema(
-    *, installation_id: str, battery_capacity_sensor: str
+    *, installation_id: str, battery_capacity_sensor: str, capacity_source: str
 ) -> vol.Schema:
     """Build the initial config flow schema."""
     fields: dict[vol.Marker, object] = {
@@ -108,6 +111,14 @@ def _user_schema(
                 default=os.environ.get(TEST_URL_ENVIRONMENT_VARIABLE, "").strip(),
             )
         ] = str
+        fields[
+            vol.Required(CONF_CAPACITY_SOURCE, default=capacity_source)
+        ] = vol.In(
+            {
+                CAPACITY_SOURCE_EXTERNAL_ENTITY: "External entity",
+                CAPACITY_SOURCE_VIRTUAL_BATTERY: "Virtual battery",
+            }
+        )
 
     return vol.Schema(fields)
 
@@ -118,7 +129,7 @@ class HorizonIQConfigFlow(
     """Handle HorizonIQ config and reauth flows."""
 
     DOMAIN = DOMAIN
-    VERSION = 2
+    VERSION = 3
 
     def __init__(self) -> None:
         super().__init__()
@@ -130,6 +141,7 @@ class HorizonIQConfigFlow(
         self._battery_capacity_sensor = default_config_data()[
             CONF_BATTERY_CAPACITY_SENSOR
         ]
+        self._capacity_source = CAPACITY_SOURCE_EXTERNAL_ENTITY
         self._environment = DEFAULT_ENVIRONMENT
         self._device_token: str | None = None
         self._reauth_entry: ConfigEntry | None = None
@@ -165,18 +177,22 @@ class HorizonIQConfigFlow(
             self._battery_capacity_sensor = str(
                 user_input.get(CONF_BATTERY_CAPACITY_SENSOR, "")
             ).strip()
+            self._capacity_source = str(
+                user_input.get(CONF_CAPACITY_SOURCE, CAPACITY_SOURCE_EXTERNAL_ENTITY)
+            ).strip()
             config_data = normalize_config_input(
                 {
                     CONF_URL: "https://placeholder.invalid/api/Forecast_Get",
                     CONF_API_KEY: "bootstrap",
                     CONF_BATTERY_CAPACITY_SENSOR: self._battery_capacity_sensor,
+                    CONF_CAPACITY_SOURCE: self._capacity_source,
                     CONF_ENVIRONMENT: selected_environment,
                 }
             )
             errors = {
                 key: value
                 for key, value in validate_config_data(config_data).items()
-                if key == CONF_BATTERY_CAPACITY_SENSOR
+                if key in {CONF_BATTERY_CAPACITY_SENSOR, CONF_CAPACITY_SOURCE}
             }
 
             if action not in {ACTION_SIGN_IN, ACTION_CREATE_ACCOUNT}:
@@ -195,6 +211,7 @@ class HorizonIQConfigFlow(
 
             if not errors:
                 self._environment = config_data[CONF_ENVIRONMENT]
+                self._capacity_source = config_data[CONF_CAPACITY_SOURCE]
                 self._installation_id = await _async_installation_id(self.hass)
                 self._mode = action
                 self._portal_connection_url = portal_connection_url
@@ -205,6 +222,11 @@ class HorizonIQConfigFlow(
             data_schema=_user_schema(
                 installation_id=await _async_installation_id(self.hass),
                 battery_capacity_sensor=config_data[CONF_BATTERY_CAPACITY_SENSOR],
+                capacity_source=(
+                    CAPACITY_SOURCE_VIRTUAL_BATTERY
+                    if _developer_mode_enabled()
+                    else CAPACITY_SOURCE_EXTERNAL_ENTITY
+                ),
             ),
             errors=errors,
         )
@@ -394,6 +416,7 @@ class HorizonIQConfigFlow(
             battery_capacity_sensor=self._battery_capacity_sensor,
             environment=self._environment,
             device_token=self._device_token,
+            capacity_source=self._capacity_source,
         )
 
         if self._reauth_entry is not None:
@@ -487,6 +510,7 @@ def _entry_data_from_bootstrap(
     battery_capacity_sensor: str,
     environment: str,
     device_token: str | None,
+    capacity_source: str | None = None,
 ) -> dict[str, object]:
     try:
         return entry_data_from_bootstrap(
@@ -496,6 +520,7 @@ def _entry_data_from_bootstrap(
             battery_capacity_sensor=battery_capacity_sensor,
             environment=environment,
             device_token=device_token,
+            capacity_source=capacity_source,
         )
     except ValueError as err:
         raise HorizonIQApiError("Entitled bootstrap response is incomplete") from err

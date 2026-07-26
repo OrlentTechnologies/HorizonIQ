@@ -11,6 +11,7 @@ import voluptuous as vol
 from .const import (
     CONF_API_KEY,
     CONF_BATTERY_CAPACITY_SENSOR,
+    CONF_CAPACITY_SOURCE,
     CONF_ENVIRONMENT,
     CONF_FORECAST_DEVICE_ID,
     CONF_FORECAST_DEVICE_TOKEN,
@@ -21,6 +22,8 @@ from .const import (
     CONF_URL,
     DEFAULT_API_KEY,
     DEFAULT_BATTERY_CAPACITY_SENSOR,
+    CAPACITY_SOURCE_EXTERNAL_ENTITY,
+    CAPACITY_SOURCE_VIRTUAL_BATTERY,
     DEFAULT_ENVIRONMENT_LABEL,
     DEFAULT_FORECAST_URL,
     SANDBOX_ENVIRONMENT,
@@ -43,6 +46,7 @@ def default_config_data() -> HorizonIQConfigData:
         url=DEFAULT_FORECAST_URL,
         api_key=DEFAULT_API_KEY,
         battery_capacity_sensor=DEFAULT_BATTERY_CAPACITY_SENSOR,
+        capacity_source=CAPACITY_SOURCE_EXTERNAL_ENTITY,
         environment=DEFAULT_ENVIRONMENT_LABEL,
         hash="",
         registration_data="",
@@ -59,6 +63,7 @@ def normalize_config_input(user_input: Mapping[str, object]) -> HorizonIQConfigD
         battery_capacity_sensor=_strip_text(
             user_input.get(CONF_BATTERY_CAPACITY_SENSOR)
         ),
+        capacity_source=_strip_text(user_input.get(CONF_CAPACITY_SOURCE)) or CAPACITY_SOURCE_EXTERNAL_ENTITY,
         environment=normalize_environment(_string_value(user_input.get(CONF_ENVIRONMENT))),
         hash=_string_value(user_input.get(CONF_HASH)),
         registration_data=_string_value(user_input.get(CONF_REGISTRATION_DATA)),
@@ -84,6 +89,7 @@ def merged_config_data(entry: ConfigEntry) -> HorizonIQConfigData:
                 CONF_BATTERY_CAPACITY_SENSOR,
                 defaults[CONF_BATTERY_CAPACITY_SENSOR],
             ),
+            CONF_CAPACITY_SOURCE: _entry_value(entry, CONF_CAPACITY_SOURCE, CAPACITY_SOURCE_EXTERNAL_ENTITY),
             CONF_ENVIRONMENT: _entry_value(
                 entry, CONF_ENVIRONMENT, defaults[CONF_ENVIRONMENT]
             ),
@@ -111,10 +117,15 @@ def validate_config_data(config_data: HorizonIQConfigData) -> dict[str, str]:
     if not config_data[CONF_API_KEY]:
         errors[CONF_API_KEY] = "required"
 
+    source = config_data[CONF_CAPACITY_SOURCE]
+    if source not in {CAPACITY_SOURCE_EXTERNAL_ENTITY, CAPACITY_SOURCE_VIRTUAL_BATTERY}:
+        errors[CONF_CAPACITY_SOURCE] = "invalid_capacity_source"
+    if source == CAPACITY_SOURCE_VIRTUAL_BATTERY and normalize_environment(config_data[CONF_ENVIRONMENT]) != SANDBOX_ENVIRONMENT:
+        errors[CONF_CAPACITY_SOURCE] = "virtual_battery_requires_sandbox"
     battery_sensor = config_data[CONF_BATTERY_CAPACITY_SENSOR]
-    if not battery_sensor:
+    if source == CAPACITY_SOURCE_EXTERNAL_ENTITY and not battery_sensor:
         errors[CONF_BATTERY_CAPACITY_SENSOR] = "required"
-    else:
+    elif source == CAPACITY_SOURCE_EXTERNAL_ENTITY:
         try:
             cv.entity_id(battery_sensor)
         except vol.Invalid:
@@ -141,6 +152,7 @@ def build_config_schema(
                 CONF_BATTERY_CAPACITY_SENSOR,
                 default=config_data[CONF_BATTERY_CAPACITY_SENSOR],
             ): str,
+            vol.Optional(CONF_CAPACITY_SOURCE, default=config_data[CONF_CAPACITY_SOURCE]): vol.In([CAPACITY_SOURCE_EXTERNAL_ENTITY, CAPACITY_SOURCE_VIRTUAL_BATTERY]),
             vol.Optional(
                 CONF_ENVIRONMENT,
                 default=_environment_for_form(config_data[CONF_ENVIRONMENT]),

@@ -142,6 +142,20 @@
       <h2>More Detail</h2>
       <p>For full details and changelog, see the project README in the GitHub repository for this integration.</p>
     </div>
+
+    <div class="card">
+      <h2>Sandbox virtual battery</h2>
+      <p>Sandbox entries using <code>Virtual battery</code> expose one isolated device. Enable <code>Simulation</code> first; operational numbers, selectors, buttons, and telemetry are unavailable while it is disabled. Each entry has its own generated GX ID, virtual clock, profile directory, snapshots, faults, and MQTT handlers.</p>
+      <p>Use the device to change synthetic load/solar, battery limits and efficiencies, clock rate, scenario, profile, and fault kind. Use the <code>horizoniq</code> services for profile playback, deterministic stepping, reset, snapshot create/list/restore/delete, and fault lifecycle actions.</p>
+      <p>Profiles are synthetic JSON or CSV files under <code>&lt;HA config&gt;/horizoniq/profiles/&lt;config_entry_id&gt;/</code>, validated at five-minute resolution and limited to 31 days. Snapshots are local and contain virtual state only; no credentials, production identities, or actual telemetry.</p>
+      <p>Energy-balance health checks: grid import + solar + battery discharge = load + battery charge + grid export + modeled conversion losses. Conversion loss is expected when efficiency is below 100%; a balance error beyond tolerance marks the sandbox unhealthy.</p>
+    </div>
+
+    <div class="card">
+      <h2>MQTT setup</h2>
+      <p>Configure Home Assistant MQTT with Mosquitto or another compatible broker, then create one sandbox-only Node-RED account. Where supported, limit its ACLs to <code>victron/N/horizoniq-*</code>, <code>victron/W/horizoniq-*</code>, <code>victron/R/horizoniq-*</code>, and <code>horizoniq/sandbox/horizoniq-*</code>.</p>
+      <p>Give each Node-RED sandbox runtime a unique client ID and its matching generated GX ID. Topics are created automatically—do not provision them manually. Enable a sandbox, check MQTT health, step it, validate synthetic <code>N</code> telemetry and a matching non-retained <code>W</code> acknowledgement, then use <code>R/.../keepalive</code> to validate refresh. Repeat with another sandbox to verify isolation.</p>
+    </div>
   </div>
 </body>
 </html>

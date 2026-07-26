@@ -22,6 +22,7 @@ from .config_data import merged_config_data, validate_config_data
 from .const import (
     CONF_API_KEY,
     CONF_BATTERY_CAPACITY_SENSOR,
+    CONF_CAPACITY_SOURCE,
     CONF_BOOTSTRAP_REFRESH_AFTER_UTC,
     CONF_ENVIRONMENT,
     CONF_FORECAST_DEVICE_ID,
@@ -34,6 +35,8 @@ from .const import (
     CONF_SUBSCRIPTION_STATUS,
     CONF_URL,
     DEFAULT_ENVIRONMENT,
+    CAPACITY_SOURCE_EXTERNAL_ENTITY,
+    CAPACITY_SOURCE_VIRTUAL_BATTERY,
     DOMAIN,
     ENTITLED_SUBSCRIPTION_STATUSES,
     ISSUE_ENTITLEMENT_LOST,
@@ -42,6 +45,9 @@ from .const import (
     PLATFORMS,
 )
 from .coordinator import HorizonIQCoordinator
+from .sandbox_runtime import HorizonIQEntryRuntime, canonical_registration_id, registration_id_is_unique
+from .sandbox_storage import async_remove_entry_storage
+from .services import async_setup_services
 from .entry_data import (
     billing_url_from_entry_data,
     entry_data_from_bootstrap,
@@ -53,7 +59,7 @@ from .models import HorizonIQConfigData
 from .oauth import HorizonIQOAuth2Implementation
 
 _LOGGER = logging.getLogger(__name__)
-_CONFIG_ENTRY_VERSION = 2
+_CONFIG_ENTRY_VERSION = 3
 _LOCAL_DOCS_READY_KEY = f"{DOMAIN}_local_docs_ready"
 _LOCAL_DOCS_SOURCE = "local_docs/index.html"
 _LOCAL_DOCS_TARGET = ("www", "horizoniq", "index.html")
@@ -90,8 +96,18 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return False
 
     if entry.version == _CONFIG_ENTRY_VERSION:
+        if entry.data.get(CONF_CAPACITY_SOURCE) not in {CAPACITY_SOURCE_EXTERNAL_ENTITY, CAPACITY_SOURCE_VIRTUAL_BATTERY}:
+            data = dict(entry.data)
+            data[CONF_CAPACITY_SOURCE] = CAPACITY_SOURCE_EXTERNAL_ENTITY
+            hass.config_entries.async_update_entry(entry, data=data)
         return True
 
+    if entry.version == 2:
+        data = dict(entry.data)
+        if data.get(CONF_CAPACITY_SOURCE) not in {CAPACITY_SOURCE_EXTERNAL_ENTITY, CAPACITY_SOURCE_VIRTUAL_BATTERY}:
+            data[CONF_CAPACITY_SOURCE] = CAPACITY_SOURCE_EXTERNAL_ENTITY
+        hass.config_entries.async_update_entry(entry, data=data, version=_CONFIG_ENTRY_VERSION)
+        return True
     if entry.version != 1:
         _LOGGER.error(
             "HorizonIQ config entry %s cannot migrate from version %s",
@@ -104,6 +120,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     updated_data = dict(entry.data)
     for key in _ENTRY_KEYS:
         updated_data[key] = config_data[key]
+    updated_data[CONF_CAPACITY_SOURCE] = CAPACITY_SOURCE_EXTERNAL_ENTITY
 
     updated_options = dict(entry.options)
     for key in _ENTRY_KEYS:
@@ -157,6 +174,7 @@ async def _ensure_local_docs(hass: HomeAssistant) -> None:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up HorizonIQ from a config entry."""
+    async_setup_services(hass)
     if not hass.data.get(_LOCAL_DOCS_READY_KEY):
         await _ensure_local_docs(hass)
         hass.data[_LOCAL_DOCS_READY_KEY] = True
@@ -213,7 +231,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         initial_registration=config_data[CONF_REGISTRATION_DATA],
         credential_refresh=credential_refresh,
     )
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    registration_id = canonical_registration_id(entry.data.get("registration_id")) or ""
+    if registration_id and not registration_id_is_unique(hass.config_entries.async_entries(DOMAIN), registration_id, entry.entry_id):
+        raise ConfigEntryNotReady("HorizonIQ registration is already configured.")
+    runtime = HorizonIQEntryRuntime(
+        coordinator=coordinator,
+        registration_id=registration_id,
+        entry_id=entry.entry_id,
+    )
+    runtime.configure_sandbox(entry.data)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+    await runtime.async_restore_storage(hass)
     await coordinator.async_refresh()
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -224,10 +252,17 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a HorizonIQ config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        runtime = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        if runtime is not None:
+            await runtime.async_unload()
 
     _LOGGER.debug("HorizonIQ unloaded for entry %s", entry.entry_id)
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove only the persisted simulator state for a deleted entry."""
+    await async_remove_entry_storage(hass, entry.entry_id)
 
 
 def _sync_entry_data(
@@ -347,6 +382,9 @@ async def _async_refresh_bootstrap_now(
         environment=str(entry.data.get(CONF_ENVIRONMENT, "")),
         device_token=str(entry.data.get(CONF_FORECAST_DEVICE_TOKEN, "")).strip()
         or None,
+        capacity_source=str(
+            entry.data.get(CONF_CAPACITY_SOURCE, CAPACITY_SOURCE_EXTERNAL_ENTITY)
+        ),
     )
     updated[CONF_REGISTRATION_DATA] = str(
         entry.data.get(CONF_REGISTRATION_DATA, "") or ""

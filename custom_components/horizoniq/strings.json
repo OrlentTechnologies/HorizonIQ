@@ -98,5 +98,22 @@
       "title": "HorizonIQ forecast credentials could not be refreshed",
       "description": "Home Assistant could not refresh HorizonIQ forecast credentials. Forecasting will continue with the last known good credentials until a valid no-subscription response is returned."
     }
+  },
+  "services": {
+    "load_profile": {"name": "Load sandbox profile", "description": "Validate and select a profile from the owning sandbox directory."},
+    "start_profile": {"name": "Start sandbox profile", "description": "Start deterministic playback for one active sandbox."},
+    "pause_profile": {"name": "Pause sandbox profile", "description": "Pause deterministic playback without changing the profile cursor."},
+    "stop_profile": {"name": "Stop sandbox profile", "description": "Stop playback and return to safe self-consumption."},
+    "reset_profile": {"name": "Reset sandbox profile", "description": "Reset the selected profile cursor."},
+    "step": {"name": "Step sandbox", "description": "Advance one active sandbox by virtual seconds."},
+    "reset": {"name": "Reset sandbox", "description": "Reset one sandbox battery and virtual clock."},
+    "snapshot_create": {"name": "Create sandbox snapshot", "description": "Save an entry-local reproducible snapshot."},
+    "snapshot_list": {"name": "List sandbox snapshots", "description": "Return snapshot names for one sandbox."},
+    "snapshot_restore": {"name": "Restore sandbox snapshot", "description": "Restore one entry-local snapshot."},
+    "snapshot_delete": {"name": "Delete sandbox snapshot", "description": "Delete one entry-local snapshot."},
+    "fault_configure": {"name": "Configure sandbox fault", "description": "Configure a bounded local fault."},
+    "fault_activate": {"name": "Activate sandbox fault", "description": "Activate one configured local fault."},
+    "fault_clear": {"name": "Clear sandbox fault", "description": "Clear one local fault."},
+    "fault_clear_all": {"name": "Clear all sandbox faults", "description": "Clear every local fault for one sandbox."}
   }
 }

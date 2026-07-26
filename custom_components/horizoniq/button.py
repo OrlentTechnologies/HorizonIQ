@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -13,6 +15,7 @@ from .entity_helpers import (
     environment_label,
     normalized_environment,
 )
+from .sandbox_runtime import HorizonIQEntryRuntime
 
 
 async def async_setup_entry(
@@ -21,14 +24,27 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the clear-registration button."""
-    coordinator = hass.data[DOMAIN][config_entry.entry_id]
+    runtime: HorizonIQEntryRuntime = hass.data[DOMAIN][config_entry.entry_id]
+    coordinator = runtime.coordinator
     environment = normalized_environment(
         getattr(coordinator, "environment", DEFAULT_ENVIRONMENT)
     )
 
-    async_add_entities(
-        [ClearRegistrationButton(coordinator, config_entry.entry_id, environment)]
-    )
+    entities: list[ButtonEntity] = [
+        ClearRegistrationButton(coordinator, config_entry.entry_id, environment)
+    ]
+    if runtime.is_sandbox_configured:
+        entities.extend(
+            [
+                SandboxStepButton(runtime, config_entry.entry_id),
+                SandboxResetButton(runtime, config_entry.entry_id),
+                SandboxResetProfileButton(runtime, config_entry.entry_id),
+                SandboxSaveSnapshotButton(runtime, config_entry.entry_id),
+                SandboxInjectFaultButton(runtime, config_entry.entry_id),
+                SandboxClearFaultsButton(runtime, config_entry.entry_id),
+            ]
+        )
+    async_add_entities(entities)
 
 
 class ClearRegistrationButton(HorizonIQEntity, ButtonEntity):
@@ -55,3 +71,104 @@ class ClearRegistrationButton(HorizonIQEntity, ButtonEntity):
     def extra_state_attributes(self) -> dict[str, str]:
         """Return diagnostic attributes for the button."""
         return {"environment": environment_label(self._environment)}
+
+
+class _SandboxButton(ButtonEntity):
+    """Common state and lifecycle support for a virtual-device button."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str, suffix: str) -> None:
+        """Initialize an entry-local sandbox control."""
+        self._runtime = runtime
+        self._attr_unique_id = build_unique_id("Sandbox", entry_id, suffix)
+        self._remove_listener = runtime.add_listener(self.async_write_ha_state)
+
+    @property
+    def available(self) -> bool:
+        """Operational controls are available only while their sandbox is active."""
+        return self._runtime.simulator_enabled
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Remove the entry-local runtime callback."""
+        self._remove_listener()
+        await super().async_will_remove_from_hass()
+
+
+class SandboxStepButton(_SandboxButton):
+    """Advance this sandbox by one deterministic half-hour step."""
+
+    _attr_name = "Step simulation"
+
+    def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str) -> None:
+        super().__init__(runtime, entry_id, "simulation_step")
+
+    async def async_press(self) -> None:
+        """Apply the next virtual half hour."""
+        await self._runtime.async_step()
+
+
+class SandboxResetButton(_SandboxButton):
+    """Reset this sandbox to its initial battery state."""
+
+    _attr_name = "Reset simulation"
+
+    def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str) -> None:
+        super().__init__(runtime, entry_id, "simulation_reset")
+
+    async def async_press(self) -> None:
+        """Reset only this virtual battery state and clock."""
+        await self._runtime.async_reset()
+
+
+class SandboxResetProfileButton(_SandboxButton):
+    """Reset the selected replay profile cursor."""
+
+    _attr_name = "Reset profile"
+
+    def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str) -> None:
+        super().__init__(runtime, entry_id, "profile_reset")
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._runtime.selected_profile_filename is not None
+
+    async def async_press(self) -> None:
+        await self._runtime.async_reset_playback()
+
+
+class SandboxSaveSnapshotButton(_SandboxButton):
+    """Save a clearly named, local point-in-time snapshot."""
+
+    _attr_name = "Save snapshot"
+
+    def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str) -> None:
+        super().__init__(runtime, entry_id, "snapshot_save")
+
+    async def async_press(self) -> None:
+        timestamp = datetime.now(timezone.utc).strftime("manual-%Y%m%d-%H%M%S")
+        await self._runtime.async_save_snapshot(timestamp)
+
+
+class SandboxInjectFaultButton(_SandboxButton):
+    """Inject the currently selected bounded sandbox fault."""
+
+    _attr_name = "Inject selected fault"
+
+    def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str) -> None:
+        super().__init__(runtime, entry_id, "fault_inject")
+
+    async def async_press(self) -> None:
+        await self._runtime.async_inject_selected_fault()
+
+
+class SandboxClearFaultsButton(_SandboxButton):
+    """Clear all local fault definitions for this sandbox."""
+
+    _attr_name = "Clear faults"
+
+    def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str) -> None:
+        super().__init__(runtime, entry_id, "fault_clear")
+
+    async def async_press(self) -> None:
+        await self._runtime.async_clear_all_faults()

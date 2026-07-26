@@ -10,6 +10,7 @@ class HorizonIQConfigData(TypedDict):
     url: str
     api_key: str
     battery_capacity_sensor: str
+    capacity_source: str
     environment: str
     hash: str
     registration_data: str

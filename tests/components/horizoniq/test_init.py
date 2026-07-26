@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import entity_registry as er
+from homeassistant.loader import async_get_integration
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.horizoniq import async_migrate_entry, async_setup_entry
@@ -19,15 +20,24 @@ from custom_components.horizoniq.const import (
     CONF_GX_DEVICE_ID,
     CONF_HASH,
     CONF_REGISTRATION_DATA,
+    CONF_REGISTRATION_ID,
     CONF_SUBSCRIPTION_STATUS,
     CONF_URL,
     DEFAULT_ENVIRONMENT,
     DOMAIN,
     PLATFORMS,
+    SANDBOX_ENVIRONMENT,
     SUBSCRIPTION_STATUS_NO_SUBSCRIPTION,
 )
 from custom_components.horizoniq.entry_data import CONF_OAUTH_RUNTIME
 from custom_components.horizoniq.entity_helpers import build_unique_id
+
+
+async def test_manifest_requires_home_assistant_mqtt(hass) -> None:
+    """HorizonIQ's manifest makes MQTT available before entry setup runs."""
+    integration = await async_get_integration(hass, DOMAIN)
+
+    assert integration.manifest["dependencies"] == ["mqtt"]
 
 
 async def test_async_migrate_entry_upgrades_v1_manual_entry(hass) -> None:
@@ -56,7 +66,8 @@ async def test_async_migrate_entry_upgrades_v1_manual_entry(hass) -> None:
 
     assert await async_migrate_entry(hass, entry)
 
-    assert entry.version == 2
+    assert entry.version == 3
+    assert entry.data["capacity_source"] == "external_entity"
     assert entry.data[CONF_URL] == "https://example.com/api/Forecast_Get?code=test-code"
     assert entry.data[CONF_API_KEY] == "test-api-key"
     assert entry.data[CONF_ENVIRONMENT] == DEFAULT_ENVIRONMENT
@@ -66,6 +77,24 @@ async def test_async_migrate_entry_upgrades_v1_manual_entry(hass) -> None:
     assert entry.data[CONF_FORECAST_DEVICE_TOKEN] == ""
     assert entry.data[CONF_GX_DEVICE_ID] == "legacy-gx-device"
     assert entry.options == {"unrelated_option": "kept"}
+
+
+@pytest.mark.parametrize("version, source, expected", [(2, None, "external_entity"), (2, "bad", "external_entity"), (3, "bad", "external_entity"), (3, "external_entity", "external_entity"), (3, "virtual_battery", "virtual_battery")])
+async def test_async_migrate_entry_normalizes_capacity_source(hass, version, source, expected) -> None:
+    data = {CONF_URL: "https://example.com/api/Forecast_Get", CONF_API_KEY: "key", CONF_BATTERY_CAPACITY_SENSOR: "sensor.capacity", CONF_ENVIRONMENT: SANDBOX_ENVIRONMENT if source == "virtual_battery" else DEFAULT_ENVIRONMENT, CONF_HASH: "", CONF_REGISTRATION_DATA: "", "unrelated": "kept"}
+    if source is not None:
+        data["capacity_source"] = source
+    entry = MockConfigEntry(domain=DOMAIN, data=data, options={"unrelated_option": "kept"}, version=version)
+    entry.add_to_hass(hass)
+    assert await async_migrate_entry(hass, entry)
+    assert entry.version == 3
+    assert entry.data["capacity_source"] == expected
+    assert entry.data["unrelated"] == "kept"
+    before_data, before_options, before_version = dict(entry.data), dict(entry.options), entry.version
+    assert await async_migrate_entry(hass, entry)
+    assert dict(entry.data) == before_data
+    assert dict(entry.options) == before_options
+    assert entry.version == before_version
 
 
 async def test_async_migrate_entry_rejects_future_version(hass) -> None:
@@ -107,7 +136,7 @@ async def test_async_setup_entry_creates_coordinator_and_forwards_platforms(
         result = await async_setup_entry(hass, mock_config_entry)
 
     assert result is True
-    assert hass.data[DOMAIN][mock_config_entry.entry_id] is coordinator
+    assert hass.data[DOMAIN][mock_config_entry.entry_id].coordinator is coordinator
     mock_docs.assert_awaited_once()
     mock_coordinator_class.assert_called_once_with(
         hass=hass,
@@ -151,7 +180,42 @@ async def test_async_setup_entry_completes_when_initial_refresh_fails(
     assert result is True
     coordinator.async_refresh.assert_awaited_once()
     mock_forward.assert_awaited_once_with(mock_config_entry, PLATFORMS)
-    assert hass.data[DOMAIN][mock_config_entry.entry_id] is coordinator
+    assert hass.data[DOMAIN][mock_config_entry.entry_id].coordinator is coordinator
+
+
+async def test_async_setup_entry_rejects_duplicate_canonical_registration_id(
+    hass,
+    entry_data: dict[str, str],
+) -> None:
+    """Entries with the same registration UUID cannot share a simulator identity."""
+    registration_id = "11111111-1111-4111-8111-111111111111"
+    existing = MockConfigEntry(
+        domain=DOMAIN,
+        data={**entry_data, CONF_REGISTRATION_ID: registration_id},
+        entry_id="existing-entry",
+    )
+    duplicate = MockConfigEntry(
+        domain=DOMAIN,
+        data={**entry_data, CONF_REGISTRATION_ID: registration_id.upper()},
+        entry_id="duplicate-entry",
+    )
+    existing.add_to_hass(hass)
+    duplicate.add_to_hass(hass)
+
+    coordinator = MagicMock()
+    coordinator.async_refresh = AsyncMock()
+    with (
+        patch("custom_components.horizoniq._ensure_local_docs", AsyncMock()),
+        patch(
+            "custom_components.horizoniq.HorizonIQCoordinator",
+            return_value=coordinator,
+        ),
+        pytest.raises(ConfigEntryNotReady, match="registration is already configured"),
+    ):
+        await async_setup_entry(hass, duplicate)
+
+    coordinator.async_refresh.assert_not_awaited()
+    assert duplicate.entry_id not in hass.data.get(DOMAIN, {})
 
 
 async def test_async_setup_entry_loads_unavailable_entities_after_initial_failure(
@@ -172,7 +236,7 @@ async def test_async_setup_entry_loads_unavailable_entities_after_initial_failur
         assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done()
 
-    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id].coordinator
     assert coordinator.last_update_success is False
     assert hass.states.get("sensor.horizoniq_total_cost").state == "unavailable"
 
@@ -295,7 +359,7 @@ async def test_async_setup_entry_sets_cadence_sensor_from_forecast_payload(
     assert cadence_state.state == "1"
     assert cadence_state.attributes["effective_poll_interval_minutes"] == 1
 
-    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = hass.data[DOMAIN][entry.entry_id].coordinator
     assert coordinator.forecast_cadence_minutes == 1
     assert coordinator.effective_forecast_cadence_minutes == 1
     assert coordinator.update_interval == timedelta(minutes=1)

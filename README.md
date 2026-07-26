@@ -90,6 +90,27 @@ Behavior:
 - Triggers a refresh request.
 - Remains available even when the coordinator is unhealthy.
 
+## Sandbox virtual battery controls
+
+Sandbox entries configured with **Virtual battery** create one isolated HorizonIQ virtual-battery device. The device has an enable switch, manual numbers for load, solar, capacity, reserve, power limits, and charge/discharge efficiency; selectors for clock rate, scenario, replay profile, registration-owned equipment profile, and fault kind; plus buttons for stepping, reset, profile reset, snapshot creation, and fault injection/clear.
+
+Operational controls and readings are unavailable when the Sandbox simulation is disabled. The device status and enable switch remain visible. Each Sandbox entry has its own generated GX ID, virtual clock, storage, MQTT subscriptions, profiles, snapshots, and faults; enabling or resetting one does not alter another.
+
+Use the `horizoniq` services for deterministic automation: `load_profile`, `start_profile`, `pause_profile`, `stop_profile`, `reset_profile`, `step`, `reset`, `snapshot_create`, `snapshot_list`, `snapshot_restore`, `snapshot_delete`, and the `fault_*` services. Every service requires the owning config-entry ID and rejects Live/non-virtual entries.
+
+Replay profiles belong in `<HA config>/horizoniq/profiles/<config_entry_id>/`. JSON and CSV are validated before selection; they are synthetic only and capped at 31 days of five-minute samples. Snapshots are local to the entry and preserve virtual battery/clock, profile cursor, command state, ledger, and faults. They never contain credentials, broker configuration, or production identities.
+
+An example conditional Lovelace section is available at [examples/lovelace-sandbox.yaml](examples/lovelace-sandbox.yaml). Copy it once per Sandbox entry and replace the entity IDs with those shown by your Home Assistant instance.
+
+### MQTT one-time setup
+
+1. Install or enable Mosquitto (or use a compatible MQTT broker), then configure Home Assistant's MQTT integration for it.
+2. Create one **sandbox-only** MQTT account for external Node-RED runtimes. Restrict it, where ACLs are available, to `victron/N/horizoniq-*`, `victron/W/horizoniq-*`, `victron/R/horizoniq-*`, and `horizoniq/sandbox/horizoniq-*`.
+3. Configure each Node-RED sandbox runtime with that broker, a unique client ID, and its matching generated GX ID. Use TLS, port, username, and password appropriate to the broker; do not put these credentials in HorizonIQ simulator storage.
+4. Enable one Sandbox, confirm its `MQTT health` sensor is `connected`, step it once, then verify that `N` telemetry arrives and a matching non-retained `W` command reaches only that device. Send an `R/.../keepalive` request to verify refresh. Repeat with a second Sandbox and confirm topic IDs and state stay separate.
+
+Topics are created automatically when the integration or Node-RED subscribes/publishes—no manual MQTT topic provisioning is required. The simulator only constructs generated `horizoniq-<uuid>` GX identities and never accepts a production topic prefix.
+
 ## Client-Side Stored Values
 
 The integration stores values in Home Assistant config entry storage (`.storage/core.config_entries`).

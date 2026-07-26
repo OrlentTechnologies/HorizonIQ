@@ -6,6 +6,7 @@ from .bootstrap import BootstrapData
 from .const import (
     CONF_API_KEY,
     CONF_BATTERY_CAPACITY_SENSOR,
+    CONF_CAPACITY_SOURCE,
     CONF_BOOTSTRAP_REASON,
     CONF_BOOTSTRAP_REFRESH_AFTER_UTC,
     CONF_BOOTSTRAP_SCHEMA_VERSION,
@@ -25,10 +26,14 @@ from .const import (
     CONF_SUBSCRIBE_URL,
     CONF_SUBSCRIPTION_STATUS,
     CONF_URL,
+    CAPACITY_SOURCE_EXTERNAL_ENTITY,
+    CAPACITY_SOURCE_VIRTUAL_BATTERY,
     DOMAIN,
     INTEGRATION_VERSION,
     PORTAL_BILLING_URL,
     SUBSCRIPTION_STATUS_TRIAL,
+    SANDBOX_ENVIRONMENT,
+    normalize_environment,
 )
 from .oauth import OAuthRuntimeConfig
 from .portal import billing_url_from_portal_connection_url
@@ -44,6 +49,7 @@ def entry_data_from_bootstrap(
     battery_capacity_sensor: str,
     environment: str,
     device_token: str | None,
+    capacity_source: str | None = None,
 ) -> dict[str, object]:
     """Build an atomic config-entry update from a validated bootstrap response."""
     if bootstrap.forecast is None or bootstrap.registration_id is None:
@@ -55,6 +61,18 @@ def entry_data_from_bootstrap(
         else None
     )
 
+    normalized_environment = normalize_environment(environment)
+    resolved_capacity_source = (
+        capacity_source
+        if normalized_environment == SANDBOX_ENVIRONMENT
+        and capacity_source
+        in {CAPACITY_SOURCE_EXTERNAL_ENTITY, CAPACITY_SOURCE_VIRTUAL_BATTERY}
+        else (
+            CAPACITY_SOURCE_VIRTUAL_BATTERY
+            if normalized_environment == SANDBOX_ENVIRONMENT
+            else CAPACITY_SOURCE_EXTERNAL_ENTITY
+        )
+    )
     return {
         "auth_implementation": DOMAIN,
         "token": oauth_data["token"],
@@ -75,7 +93,8 @@ def entry_data_from_bootstrap(
         CONF_URL: bootstrap.forecast.endpoint,
         CONF_API_KEY: bootstrap.registration_id,
         CONF_BATTERY_CAPACITY_SENSOR: battery_capacity_sensor,
-        CONF_ENVIRONMENT: environment,
+        CONF_CAPACITY_SOURCE: resolved_capacity_source,
+        CONF_ENVIRONMENT: normalized_environment,
         CONF_HASH: "",
         CONF_REGISTRATION_DATA: "",
         CONF_FORECAST_DEVICE_ID: (
