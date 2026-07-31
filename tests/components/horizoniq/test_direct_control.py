@@ -62,34 +62,35 @@ def _profile(*, exports: bool = False) -> dict[str, object]:
 
 
 def _payload(*, action: str, plan_kind: str = "live", expires: datetime | None = None) -> dict[str, object]:
+    """Derive one valid contract variation from the complete schema-5 fixture."""
     end = expires or NOW + timedelta(minutes=30)
-    period: dict[str, object] = {
-        "date": NOW.isoformat().replace("+00:00", "Z"),
-        "expectedImport": 2.0,
-        "expectedExport": 1.5,
-        "expectedStartSoc": 5.0,
-        "expectedEndSoc": 6.0,
-        "decisionTrace": {"reason": "test-action"},
-        "recommendedAction": action,
-        "executableAction": action,
-        "commandId": str(uuid4()),
-        "issuedAtUtc": NOW.isoformat().replace("+00:00", "Z"),
-        "expiresAtUtc": end.isoformat().replace("+00:00", "Z"),
-        "actionPriority": {"charge_required": 1, "use_grid": 4, "import_for_export": 5}.get(action),
-        "simulationAction": "none",
-    }
-    return {
-        "schemaVersion": 5,
-        "planId": str(uuid4()),
-        "planKind": plan_kind,
-        "createdAtUtc": NOW.isoformat().replace("+00:00", "Z"),
-        "effectiveAtUtc": NOW.isoformat().replace("+00:00", "Z"),
-        "equipmentProfile": _profile(),
-        "hash": "opaque-hash",
-        "registrationData": "opaque-registration-data",
-        "forecastCadenceMinutes": 5,
-        "periods": [period],
-    }
+    payload = _fixture_payload()
+    period = dict(payload["periods"][0])
+    trace = dict(period["decisionTrace"])
+    period.update(
+        {
+            "date": NOW.isoformat().replace("+00:00", "Z"),
+            "recommendedAction": action,
+            "executableAction": action,
+            "commandId": str(uuid4()),
+            "issuedAtUtc": NOW.isoformat().replace("+00:00", "Z"),
+            "expiresAtUtc": end.isoformat().replace("+00:00", "Z"),
+            "actionPriority": {"charge_required": 1, "use_grid": 4, "import_for_export": 5}.get(action, 0),
+        }
+    )
+    trace["selectedAction"] = action
+    period["decisionTrace"] = trace
+    payload.update(
+        {
+            "planId": str(uuid4()),
+            "planKind": plan_kind,
+            "createdAtUtc": NOW.isoformat().replace("+00:00", "Z"),
+            "effectiveAtUtc": NOW.isoformat().replace("+00:00", "Z"),
+            "equipmentProfile": _profile(),
+            "periods": [period],
+        }
+    )
+    return payload
 
 
 def test_live_charge_and_import_are_clamped_to_virtual_limits() -> None:
@@ -114,8 +115,8 @@ def test_complete_schema5_fixture_normalizes_and_drives_direct_charge() -> None:
         "home-assistant-virtual-battery"
     )
     assert normalized["periods"][0]["executable_action"] == "charge_required"
-    assert normalized["periods"][0]["decision_trace"]["reason"] == (
-        "required-charge-window"
+    assert normalized["periods"][0]["decision_trace"]["reasonCode"] == (
+        "normal_charge_priority"
     )
 
     command = parse_live_command(
@@ -125,17 +126,14 @@ def test_complete_schema5_fixture_normalizes_and_drives_direct_charge() -> None:
     assert command.command.requested_grid_power_w == 2_000
 
 
-def test_live_none_with_omitted_nullable_fields_is_safe_self_consumption() -> None:
-    """Match Forecast_Get serialization, which omits null command metadata."""
+def test_live_none_with_null_command_metadata_is_safe_self_consumption() -> None:
+    """Keep the complete contract's null command metadata non-commanding."""
     payload = _fixture_payload()
     period = payload["periods"][1]
     assert isinstance(period, dict)
-    assert not {
-        "commandId",
-        "issuedAtUtc",
-        "expiresAtUtc",
-        "actionPriority",
-    } & period.keys()
+    assert period["commandId"] is None
+    assert period["issuedAtUtc"] is None
+    assert period["expiresAtUtc"] is None
     command = parse_live_command(
         _coordinator_forecast(payload),
         now_utc=NOW + timedelta(minutes=30),
@@ -292,7 +290,17 @@ def test_replay_export_uses_half_hour_power_and_no_command_identity() -> None:
     payload = _payload(action="none", plan_kind="sandbox_replay")
     period = payload["periods"][0]
     assert isinstance(period, dict)
-    period.update({"simulationAction": "export_for_profit", "executableAction": "none", "commandId": None, "issuedAtUtc": None, "expiresAtUtc": None, "actionPriority": None})
+    period.update(
+        {
+            "simulationAction": "export_for_profit",
+            "executableAction": "none",
+            "commandId": None,
+            "issuedAtUtc": None,
+            "expiresAtUtc": None,
+            "actionPriority": None,
+            "expectedExport": 1.0,
+        }
+    )
     payload["equipmentProfile"] = _profile(exports=True)
     command = parse_replay_command(payload, virtual_now_utc=NOW, config=CONFIG)
     assert command.command.requested_grid_power_w == -2_000

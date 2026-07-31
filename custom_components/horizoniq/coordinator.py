@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from datetime import timedelta
 from http import HTTPStatus
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -41,6 +42,7 @@ from .coordinator_helpers import (
     extract_forecast_cadence_minutes_from_registration_data,
     normalize_trial,
 )
+from .forecast_schema5 import Schema5Forecast, Schema5ForecastError
 from .models import Forecast, ForecastData, ForecastPeriod, HorizonIQSnapshot
 
 _LOGGER = logging.getLogger(__name__)
@@ -87,6 +89,7 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         self._has_successful_forecast = False
         self._initial_forecast_failures = 0
         self._latest_snapshot = HorizonIQSnapshot()
+        self._last_valid_schema5_forecast: Schema5Forecast | None = None
         self.environment = normalize_environment(environment)
         self._sandbox_paused = False
         self._sandbox_explicit_refresh = False
@@ -128,7 +131,7 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
             request_url=self._build_request_url(battery_capacity),
             battery_capacity=battery_capacity,
         )
-        snapshot = build_snapshot(payload)
+        snapshot = self._build_snapshot_or_stale(payload)
         self._latest_snapshot = snapshot
         self._has_successful_forecast = True
         self._initial_forecast_failures = 0
@@ -212,6 +215,11 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         """Return the target capacity from the current snapshot."""
         return self._current_snapshot.target_capacity
 
+    @property
+    def schema5_forecast(self) -> Schema5Forecast | None:
+        """Return this entry's complete latest schema-5 diagnostics horizon."""
+        return self._current_snapshot.schema5_forecast
+
     async def _async_update_data(self) -> HorizonIQSnapshot:
         """Fetch the latest HorizonIQ data."""
         if self._sandbox_paused and not self._sandbox_explicit_refresh:
@@ -238,7 +246,7 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
                 str(err),
                 retry_after=self._next_initial_forecast_retry_seconds(),
             ) from err
-        snapshot = build_snapshot(payload)
+        snapshot = self._build_snapshot_or_stale(payload)
         self._has_successful_forecast = True
         self._initial_forecast_failures = 0
         if snapshot.forecast_cadence_minutes is not None:
@@ -253,6 +261,23 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
             self._entry.entry_id,
             len(snapshot.forecast_periods),
         )
+        return snapshot
+
+    def _build_snapshot_or_stale(
+        self, payload: Mapping[str, object]
+    ) -> HorizonIQSnapshot:
+        """Keep the last complete schema-5 plan when a new contract is rejected."""
+        try:
+            snapshot = build_snapshot(payload)
+        except Schema5ForecastError as err:
+            if self._last_valid_schema5_forecast is None:
+                raise UpdateFailed(f"Malformed schema-5 forecast: {err}") from err
+            return replace(
+                self._latest_snapshot,
+                schema5_forecast=self._last_valid_schema5_forecast.as_stale(),
+            )
+        if snapshot.schema5_forecast is not None:
+            self._last_valid_schema5_forecast = snapshot.schema5_forecast
         return snapshot
 
     def _next_initial_forecast_retry_seconds(self) -> int:

@@ -342,8 +342,6 @@ def _validate_plan(
     plan_id = _uuid(payload.get("planId"), "planId")
     _utc_z(payload.get("createdAtUtc"), "createdAtUtc")
     _utc_z(payload.get("effectiveAtUtc"), "effectiveAtUtc")
-    _text(payload.get("hash"), "hash")
-    _text(payload.get("registrationData"), "registrationData")
     if _integer(payload.get("forecastCadenceMinutes"), "forecastCadenceMinutes") <= 0:
         raise ValueError("forecastCadenceMinutes is invalid")
     profile = payload.get("equipmentProfile")

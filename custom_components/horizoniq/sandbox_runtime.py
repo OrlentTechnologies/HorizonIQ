@@ -98,6 +98,7 @@ from .direct_control import (
     validate_live_forecast,
 )
 from .models import Forecast
+from .forecast_schema5 import Schema5Forecast
 from .sandbox_storage import (
     MAX_NAMED_SNAPSHOTS,
     SNAPSHOT_SCHEMA_VERSION,
@@ -482,6 +483,12 @@ class HorizonIQEntryRuntime:
     def forecast_health(self) -> str:
         """Return the direct HA forecast status for this virtual battery."""
         return self._direct_forecast_health
+
+    @property
+    def forecast_diagnostics(self) -> Schema5Forecast | None:
+        """Return the latest complete entry-local schema-5 forecast horizon."""
+        forecast = getattr(self.coordinator, "schema5_forecast", None)
+        return forecast if isinstance(forecast, Schema5Forecast) else None
 
     @property
     def decision_summary(self) -> str:

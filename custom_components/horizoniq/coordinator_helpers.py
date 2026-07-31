@@ -17,6 +17,7 @@ from .models import (
     RegistrationData,
     TrialData,
 )
+from .forecast_schema5 import parse_schema5_forecast
 
 
 def extract_first(payload: Mapping[str, object], keys: Iterable[str]) -> object | None:
@@ -390,9 +391,9 @@ def normalize_direct_forecast(forecast: ForecastData) -> Forecast | None:
                 forecast["effective_at_utc"], "effective_at_utc"
             ),
             equipment_profile=profile,
-            hash_value=_direct_text(forecast["hash"], "hash"),
-            registration_data=_direct_text(
-                forecast["registration_data"], "registration_data"
+            hash_value=_direct_optional_text(forecast.get("hash")) or "",
+            registration_data=(
+                _direct_optional_text(forecast.get("registration_data")) or ""
             ),
             forecast_cadence_minutes=_direct_int(
                 forecast["forecast_cadence_minutes"], "forecast_cadence_minutes"
@@ -624,6 +625,7 @@ def build_snapshot(payload: Mapping[str, object] | None) -> HorizonIQSnapshot:
     if not isinstance(payload, Mapping):
         return HorizonIQSnapshot()
 
+    schema5_forecast = parse_schema5_forecast(payload)
     forecast = dict(normalize_forecast(payload))
     trial = normalize_trial(payload)
     periods = forecast.get("periods") or normalize_periods(payload)
@@ -711,6 +713,7 @@ def build_snapshot(payload: Mapping[str, object] | None) -> HorizonIQSnapshot:
 
     return HorizonIQSnapshot(
         forecast=forecast,
+        schema5_forecast=schema5_forecast,
         direct_forecast=direct_forecast,
         trial=trial,
         forecast_periods=periods,

@@ -31,7 +31,9 @@ class ForecastDetailSensor(HorizonIQEntity, SensorEntity):
     """Expose a compact forecast summary without retaining payload data."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _unrecorded_attributes = frozenset({"reason", "last_error"})
+    _unrecorded_attributes = frozenset(
+        {"reason", "last_error", "forecast_horizon"}
+    )
 
     def __init__(self, coordinator, entry_id: str, environment: str) -> None:
         super().__init__(coordinator)
@@ -65,6 +67,7 @@ class ForecastDetailSensor(HorizonIQEntity, SensorEntity):
             return attrs
 
         forecast = snapshot.forecast
+        schema5_forecast = snapshot.schema5_forecast
         _add_text_attribute(attrs, "selected_action", _selected_action(snapshot))
         for key in ("calculated_on_utc", "created_at_utc", "effective_at_utc"):
             _add_text_attribute(attrs, key, forecast.get(key))
@@ -79,6 +82,11 @@ class ForecastDetailSensor(HorizonIQEntity, SensorEntity):
             "last_error",
             getattr(self.coordinator, "last_exception", None),
         )
+        if schema5_forecast is not None:
+            attrs["plan_id"] = schema5_forecast.plan_id
+            attrs["plan_kind"] = schema5_forecast.plan_kind
+            attrs["stale"] = schema5_forecast.stale
+            attrs["forecast_horizon"] = schema5_forecast.to_dict()
         return attrs
 
 

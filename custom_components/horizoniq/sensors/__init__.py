@@ -18,6 +18,7 @@ from .monetary import MonetarySensor
 from .diagnostic import ForecastDetailSensor
 from .bms_state import BatteryManagementSystemStateSensor
 from .trial import TrialStatusSensor
+from .import_for_export import ImportForExportDecisionSensor
 
 
 async def async_setup_entry(
@@ -111,6 +112,7 @@ def _sandbox_entities(
         ),
         SandboxRuntimeSensor(runtime, entry_id, "profile_cursor", "Profile cursor", diagnostic=True),
         SandboxRuntimeSensor(runtime, entry_id, "faults", "Active faults", diagnostic=True),
+        ImportForExportDecisionSensor(runtime, entry_id),
     ]
 
 

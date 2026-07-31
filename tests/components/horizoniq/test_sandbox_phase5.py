@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,6 +21,7 @@ from custom_components.horizoniq.const import (
     SANDBOX_ENVIRONMENT,
 )
 from custom_components.horizoniq.sandbox_runtime import HorizonIQEntryRuntime
+from custom_components.horizoniq.forecast_schema5 import parse_schema5_forecast
 from custom_components.horizoniq.number import SandboxNumber, _CONTROLS
 from custom_components.horizoniq.services import async_setup_services
 from custom_components.horizoniq.select import (
@@ -37,6 +40,9 @@ from custom_components.horizoniq.simulation.models import (
 
 
 REGISTRATION_ID = "11111111-1111-4111-8111-111111111111"
+_SCHEMA5_FIXTURE = (
+    Path(__file__).with_name("fixtures") / "direct_schema5_forecast.json"
+)
 
 
 def _runtime(entry_id: str = "phase5-entry") -> HorizonIQEntryRuntime:
@@ -152,6 +158,7 @@ async def test_virtual_battery_ui_formats_states_and_categories(hass) -> None:
         "balance_error",
         "profile_cursor",
         "faults",
+        "import_for_export_decision",
     }
     for key, sensor in sensors.items():
         expected = EntityCategory.DIAGNOSTIC if key in diagnostic_keys else None
@@ -251,6 +258,44 @@ async def test_snapshot_services_are_registered_and_scoped_to_owning_entry(hass)
 
     assert response == {"snapshots": ["phase-five"]}
     await runtime.async_disable()
+
+
+async def test_forecast_diagnostics_service_returns_one_complete_entry_horizon(hass) -> None:
+    """The diagnostics response is complete, entry-local, and never Store-backed."""
+    forecast = parse_schema5_forecast(
+        json.loads(_SCHEMA5_FIXTURE.read_text(encoding="utf-8"))
+    )
+    assert forecast is not None
+    first = _runtime("diagnostics-first")
+    second = _runtime("diagnostics-second")
+    first.coordinator.schema5_forecast = forecast
+    second.coordinator.schema5_forecast = None
+    hass.data.setdefault(DOMAIN, {}).update(
+        {first.entry_id: first, second.entry_id: second}
+    )
+    async_setup_services(hass)
+
+    response = await hass.services.async_call(
+        DOMAIN,
+        "get_sandbox_forecast_diagnostics",
+        {"entry_id": first.entry_id},
+        blocking=True,
+        return_response=True,
+    )
+
+    assert response == forecast.to_dict()
+    assert "registrationData" not in repr(response)
+    stored = json.dumps(first._storage_record())
+    assert "forecast_horizon" not in stored
+    assert forecast.plan_id not in stored
+    with pytest.raises(HomeAssistantError, match="No complete schema-5 forecast"):
+        await hass.services.async_call(
+            DOMAIN,
+            "get_sandbox_forecast_diagnostics",
+            {"entry_id": second.entry_id},
+            blocking=True,
+            return_response=True,
+        )
 
 
 async def test_mutating_services_reject_inactive_and_unknown_entries(hass) -> None:

@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TypedDict
 
+from .forecast_schema5 import Schema5Forecast
+
 
 class HorizonIQConfigData(TypedDict):
     """Stored config entry values for HorizonIQ."""
@@ -207,6 +209,7 @@ class HorizonIQSnapshot:
     """Typed coordinator snapshot consumed by entities."""
 
     forecast: ForecastData = field(default_factory=dict)
+    schema5_forecast: Schema5Forecast | None = None
     direct_forecast: Forecast | None = None
     trial: TrialData = field(default_factory=dict)
     forecast_periods: list[ForecastPeriod] = field(default_factory=list)

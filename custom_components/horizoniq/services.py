@@ -43,6 +43,16 @@ def _runtime(hass: HomeAssistant, entry_id: str) -> HorizonIQEntryRuntime:
     return runtime
 
 
+def _diagnostics_runtime(hass: HomeAssistant, entry_id: str) -> HorizonIQEntryRuntime:
+    """Return one configured sandbox without requiring its simulator to run."""
+    runtime = hass.data.get(DOMAIN, {}).get(entry_id)
+    if not isinstance(runtime, HorizonIQEntryRuntime) or not runtime.is_sandbox_configured:
+        raise HomeAssistantError("The selected HorizonIQ entry is not a virtual sandbox")
+    if runtime._unloaded:
+        raise HomeAssistantError("The selected HorizonIQ sandbox is unloaded")
+    return runtime
+
+
 async def _async_load_profile(hass: HomeAssistant, call: ServiceCall) -> None:
     await _runtime(hass, call.data["entry_id"]).async_select_profile(call.data["filename"])
 
@@ -98,6 +108,16 @@ async def _async_snapshot_restore(hass: HomeAssistant, call: ServiceCall) -> Non
 
 async def _async_snapshot_delete(hass: HomeAssistant, call: ServiceCall) -> None:
     await _runtime(hass, call.data["entry_id"]).async_delete_snapshot(call.data["name"])
+
+
+async def _async_get_sandbox_forecast_diagnostics(
+    hass: HomeAssistant, call: ServiceCall
+) -> dict[str, object]:
+    """Return the complete normalized horizon for exactly one sandbox entry."""
+    forecast = _diagnostics_runtime(hass, call.data["entry_id"]).forecast_diagnostics
+    if forecast is None:
+        raise HomeAssistantError("No complete schema-5 forecast is available")
+    return forecast.to_dict()
 
 
 async def _async_fault_configure(hass: HomeAssistant, call: ServiceCall) -> None:
@@ -162,6 +182,13 @@ def async_setup_services(hass: HomeAssistant) -> None:
     hass.services.async_register(DOMAIN, "snapshot_list", _service_handler(hass, _async_snapshot_list), schema=entry_schema, supports_response=SupportsResponse.ONLY)
     hass.services.async_register(DOMAIN, "snapshot_restore", _service_handler(hass, _async_snapshot_restore), schema=named_schema)
     hass.services.async_register(DOMAIN, "snapshot_delete", _service_handler(hass, _async_snapshot_delete), schema=named_schema)
+    hass.services.async_register(
+        DOMAIN,
+        "get_sandbox_forecast_diagnostics",
+        _service_handler(hass, _async_get_sandbox_forecast_diagnostics),
+        schema=entry_schema,
+        supports_response=SupportsResponse.ONLY,
+    )
     hass.services.async_register(DOMAIN, "fault_configure", _service_handler(hass, _async_fault_configure), schema=vol.Schema({_ENTRY_ID: str, vol.Required("kind"): str, vol.Optional("remaining_count"): vol.All(vol.Coerce(int), vol.Range(min=1, max=100)), vol.Optional("remaining_duration_seconds"): vol.All(vol.Coerce(float), vol.Range(min=1, max=900)), vol.Optional("settings"): dict, vol.Optional("activate", default=True): bool}))
     hass.services.async_register(DOMAIN, "fault_activate", _service_handler(hass, _async_fault_activate), schema=vol.Schema({_ENTRY_ID: str, _FAULT_ID: str}))
     hass.services.async_register(DOMAIN, "fault_clear", _service_handler(hass, _async_fault_clear), schema=vol.Schema({_ENTRY_ID: str, _FAULT_ID: str}))

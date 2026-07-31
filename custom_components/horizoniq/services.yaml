@@ -110,6 +110,14 @@ snapshot_list:
       required: true
       selector:
         text:
+get_sandbox_forecast_diagnostics:
+  name: Get sandbox forecast diagnostics
+  description: Returns the complete normalized schema-5 forecast for exactly one virtual Sandbox entry.
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
 snapshot_restore:
   name: Restore sandbox snapshot
   fields:
