@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -24,6 +25,7 @@ from custom_components.horizoniq.const import (
     SANDBOX_ENVIRONMENT,
 )
 from custom_components.horizoniq.entity_helpers import build_unique_id
+from custom_components.horizoniq.number import _CONTROLS
 from custom_components.horizoniq.simulation.clock import ClockRate
 
 
@@ -67,6 +69,100 @@ def _entity_id(hass, domain: str, entry_id: str, suffix: str) -> str:
     return entity_id
 
 
+def _assert_virtual_entities_are_available(hass, entry_id: str) -> None:
+    """Assert all entry-local virtual entities publish a state immediately."""
+    entity_suffixes = {
+        "sensor": (
+            "forecast_diagnostics",
+            "forecast_cadence",
+            "bms_state",
+            "trial_status",
+            "status",
+            "soc",
+            "energy",
+            "battery_power",
+            "grid_power",
+            "clock",
+            "mqtt",
+            "forecast",
+            "command",
+            "decision",
+            "health",
+            "balance_error",
+            "profile_cursor",
+            "faults",
+        ),
+        "number": tuple(description.key for description in _CONTROLS),
+        "switch": ("simulation", "profile_playback"),
+        "select": (
+            "clock_rate",
+            "profile",
+            "scenario",
+            "equipment_profile",
+            "fault_kind",
+        ),
+        "button": (
+            "simulation_step",
+            "simulation_reset",
+            "profile_reset",
+            "snapshot_save",
+            "fault_inject",
+            "fault_clear",
+        ),
+    }
+    for domain, suffixes in entity_suffixes.items():
+        for suffix in suffixes:
+            entity_id = _entity_id(hass, domain, entry_id, suffix)
+            assert hass.states.get(entity_id).state != STATE_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_virtual_entities_remain_available_when_runtime_is_disabled_or_offline(hass) -> None:
+    """UI availability is independent from simulation, MQTT, and forecast health."""
+    entry = _entry()
+    entry.add_to_hass(hass)
+    with (
+        patch("custom_components.horizoniq._ensure_local_docs", AsyncMock()),
+        patch(
+            "custom_components.horizoniq.coordinator.HorizonIQCoordinator.async_refresh",
+            AsyncMock(),
+        ),
+        patch(
+            "custom_components.horizoniq.sandbox_runtime.mqtt.async_subscribe",
+            AsyncMock(side_effect=RuntimeError("MQTT unavailable")),
+        ),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        _assert_virtual_entities_are_available(hass, entry.entry_id)
+
+        simulation = _entity_id(hass, "switch", entry.entry_id, "simulation")
+        state_of_charge = _entity_id(
+            hass, "number", entry.entry_id, "set_state_of_charge"
+        )
+        assert hass.states.get(state_of_charge).state == "50.0"
+        await hass.services.async_call(
+            "switch", "turn_on", {"entity_id": simulation}, blocking=True
+        )
+        await hass.async_block_till_done()
+        assert hass.states.get(simulation).state == "on"
+        _assert_virtual_entities_are_available(hass, entry.entry_id)
+
+        await hass.services.async_call(
+            "number",
+            "set_value",
+            {"entity_id": state_of_charge, "value": 75},
+            blocking=True,
+        )
+
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        _assert_virtual_entities_are_available(hass, entry.entry_id)
+        assert hass.states.get(state_of_charge).state == "75.0"
+        assert await hass.config_entries.async_unload(entry.entry_id)
+
+
 @pytest.mark.asyncio
 async def test_service_and_number_update_paused_virtual_battery_entities(hass) -> None:
     """A real entry setup changes SoC/energy without a broker or clock advance."""
@@ -96,7 +192,7 @@ async def test_service_and_number_update_paused_virtual_battery_entities(hass) -
         await hass.services.async_call("switch", "turn_on", {"entity_id": switch}, blocking=True)
         assert runtime.clock_rate == ClockRate.PAUSED.value
         time_before = runtime.virtual_time_utc
-        number_state = hass.states[number]
+        number_state = hass.states.get(number)
         assert number_state.attributes["mode"] == "box"
         assert number_state.attributes["unit_of_measurement"] == "%"
         assert number_state.attributes["step"] == 0.1
@@ -108,10 +204,10 @@ async def test_service_and_number_update_paused_virtual_battery_entities(hass) -
             blocking=True,
         )
         await hass.async_block_till_done()
-        assert hass.states[soc].state == "75.0"
-        assert hass.states[energy].state == "7500.0"
-        assert hass.states[energy].attributes["unit_of_measurement"] == "Wh"
-        assert hass.states[number].state == "75.0"
+        assert hass.states.get(soc).state == "75.0"
+        assert hass.states.get(energy).state == "7500.0"
+        assert hass.states.get(energy).attributes["unit_of_measurement"] == "Wh"
+        assert hass.states.get(number).state == "75.0"
         assert runtime.virtual_time_utc == time_before
         assert runtime.energy_ledger.manual_adjustment_wh == 2_500
         assert runtime.energy_ledger.balance_error_wh == 0
@@ -120,11 +216,11 @@ async def test_service_and_number_update_paused_virtual_battery_entities(hass) -
 
         await runtime.async_reset(energy_wh=7_777.77)
         await hass.async_block_till_done()
-        assert hass.states[number].state == "77.8"
+        assert hass.states.get(number).state == "77.8"
 
         await runtime.async_set_control_value("capacity_wh", 20_000)
         await hass.async_block_till_done()
-        assert hass.states[number].state == "38.9"
+        assert hass.states.get(number).state == "38.9"
 
         await runtime.async_save_snapshot("soc-box")
 
@@ -132,15 +228,27 @@ async def test_service_and_number_update_paused_virtual_battery_entities(hass) -
             "number", "set_value", {"entity_id": number, "value": 72.3}, blocking=True
         )
         await hass.async_block_till_done()
-        assert hass.states[soc].state == "72.3"
-        assert hass.states[energy].state == "14460.0"
+        assert hass.states.get(soc).state == "72.3"
+        assert hass.states.get(energy).state == "14460.0"
         assert runtime.energy_wh == 14_460
 
         await runtime.async_restore_snapshot("soc-box")
         await hass.async_block_till_done()
-        assert hass.states[number].state == "38.9"
-        assert publish.await_count == 0
-        assert subscribe.await_count == 0
+        assert hass.states.get(number).state == "38.9"
+
+        await hass.services.async_call(
+            "switch", "turn_off", {"entity_id": switch}, blocking=True
+        )
+        assert hass.states.get(number).state == "38.9"
+        await hass.services.async_call(
+            "switch", "turn_on", {"entity_id": switch}, blocking=True
+        )
+        assert hass.states.get(number).state == "38.9"
+        await hass.services.async_call(
+            "switch", "turn_off", {"entity_id": switch}, blocking=True
+        )
+        assert publish.await_count > 0
+        assert subscribe.await_count == 14
         assert await hass.config_entries.async_unload(entry.entry_id)
 
 

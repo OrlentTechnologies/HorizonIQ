@@ -161,21 +161,21 @@ async def test_virtual_battery_ui_formats_states_and_categories(hass) -> None:
     await runtime.async_disable()
 
 
-def test_state_of_charge_control_availability_follows_runtime(hass) -> None:
-    """The editable SoC control is disabled while playback owns the battery."""
+def test_state_of_charge_control_availability_follows_loaded_runtime() -> None:
+    """The SoC control remains visible while the entry owns its runtime."""
     runtime = _runtime()
     description = next(item for item in _CONTROLS if item.key == "set_state_of_charge")
     number = SandboxNumber(runtime, runtime.entry_id, description)
 
-    assert number.available is False
+    assert number.available is True
     runtime.simulator_enabled = True
     assert number.available is True
     runtime._playback_state = "running"
-    assert number.available is False
+    assert number.available is True
     number._remove_listener()
 
 
-def test_fault_selector_uses_friendly_enum_labels(hass) -> None:
+def test_fault_selector_uses_friendly_enum_labels() -> None:
     """Fault selection keeps runtime enum values out of the visible UI."""
     runtime = _runtime()
     selector = SandboxFaultKindSelect(runtime, runtime.entry_id)
@@ -185,15 +185,16 @@ def test_fault_selector_uses_friendly_enum_labels(hass) -> None:
     selector._remove_listener()
 
 
-def test_profile_controls_expose_selection_state_and_availability(hass) -> None:
-    """Profile controls do not expose unknown or a non-operable selector."""
+def test_profile_controls_expose_selection_state_and_availability() -> None:
+    """Profile controls do not expose unknown or become unavailable when idle."""
     runtime = _runtime()
     profile = SandboxProfileSelect(runtime, runtime.entry_id)
     equipment = SandboxEquipmentProfileSelect(runtime, runtime.entry_id)
 
     assert profile.current_option == "Not selected"
     assert "Not selected" in profile.options
-    assert equipment.available is False
+    assert profile.available is True
+    assert equipment.available is True
     profile._remove_listener()
     equipment._remove_listener()
 

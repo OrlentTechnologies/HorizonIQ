@@ -89,6 +89,7 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         self._latest_snapshot = HorizonIQSnapshot()
         self.environment = normalize_environment(environment)
         self._sandbox_paused = False
+        self._sandbox_explicit_refresh = False
         super().__init__(
             hass,
             _LOGGER,
@@ -100,6 +101,18 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
     async def async_pause_for_sandbox(self) -> None:
         """Suppress only this coordinator's cloud refreshes while simulated."""
         self._sandbox_paused = True
+
+    async def async_request_refresh(self) -> None:
+        """Fetch when a caller explicitly requests a paused sandbox refresh."""
+        if not self._sandbox_paused:
+            await super().async_request_refresh()
+            return
+
+        self._sandbox_explicit_refresh = True
+        try:
+            await super().async_request_refresh()
+        finally:
+            self._sandbox_explicit_refresh = False
 
     async def async_resume_from_sandbox(self) -> None:
         """Resume this coordinator once after sandbox simulation stops."""
@@ -201,7 +214,7 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
 
     async def _async_update_data(self) -> HorizonIQSnapshot:
         """Fetch the latest HorizonIQ data."""
-        if self._sandbox_paused:
+        if self._sandbox_paused and not self._sandbox_explicit_refresh:
             return self._current_snapshot
         battery_capacity = self._current_battery_capacity()
         request_url = self._build_request_url(battery_capacity)

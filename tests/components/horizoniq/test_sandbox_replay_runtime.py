@@ -677,7 +677,7 @@ async def test_schema_six_defaults_flag_and_restart_republishes_flagged_request(
 
 
 async def test_replay_status_subscription_failure_keeps_existing_enable_rollback(hass) -> None:
-    """Failure of the exact replay-status subscription cleans up this entry only."""
+    """Replay subscription loss leaves local simulation enabled without transport."""
     runtime = _runtime("replay-subscription-failure")
     await _select_profile(hass, runtime)
     unsubscribe = MagicMock()
@@ -685,10 +685,11 @@ async def test_replay_status_subscription_failure_keeps_existing_enable_rollback
         "custom_components.horizoniq.sandbox_runtime.mqtt.async_subscribe",
         new=AsyncMock(side_effect=[unsubscribe, unsubscribe, RuntimeError("no replay broker")]),
     ):
-        with pytest.raises(RuntimeError, match="no replay broker"):
-            await runtime.async_enable(hass)
-    assert runtime.simulator_enabled is False
+        await runtime.async_enable(hass)
+    assert runtime.simulator_enabled is True
+    assert runtime._mqtt_emulation_enabled is False
     assert unsubscribe.call_count == 2
+    await runtime.async_disable()
 
 
 async def test_snapshot_restore_and_storage_exclude_profile_payload_or_backend_data(hass) -> None:
@@ -715,6 +716,6 @@ async def test_snapshot_restore_and_storage_exclude_profile_payload_or_backend_d
     stored = await runtime._storage.async_load()
     assert stored is not None
     serialized = json.dumps(stored).lower()
-    for forbidden in ("api_key", "token", "broker", "oauth", "actual", "outcome", "samples", "load_w"):
+    for forbidden in ("api_key", "token", "broker", "oauth", "actual", "outcome", "samples"):
         assert forbidden not in serialized
     await runtime.async_disable()

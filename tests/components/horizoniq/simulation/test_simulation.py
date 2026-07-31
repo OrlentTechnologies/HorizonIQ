@@ -63,7 +63,7 @@ def test_profile_validation_cursor_and_limit():
     with pytest.raises(ValueError): validate_profile(SyntheticProfile(1,"long",periods*745),CONFIG)
 def test_snapshot_round_trip_reproduces_next_step_exactly():
     result=step(load_w=400); clock=VirtualClock(NOW,ClockRate.X60); clock.advance(1)
-    snapshot=SimulationSnapshot(1,result.state,result.ledger,clock.state,"p",ProfileCursor("p"),Command(OperatingMode.IDLE),CommandStatus.APPLIED)
+    snapshot=SimulationSnapshot(3,result.state,result.ledger,clock.state,"p",ProfileCursor("p"),Command(OperatingMode.IDLE),CommandStatus.APPLIED)
     restored=from_json(to_json(snapshot))
     assert restored==snapshot
     assert step(previous=restored.battery_state,virtual_time_utc=restored.clock_state.virtual_time_utc,load_w=400)==step(previous=snapshot.battery_state,virtual_time_utc=snapshot.clock_state.virtual_time_utc,load_w=400)

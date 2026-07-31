@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -109,8 +110,8 @@ def test_forecast_cadence_sensor_falls_back_to_effective_interval() -> None:
     }
 
 
-def test_forecast_detail_sensor_uses_forecast_payload() -> None:
-    """Diagnostic entity exposes forecast summary attributes."""
+def test_forecast_detail_sensor_exposes_only_a_bounded_summary() -> None:
+    """Diagnostic entity does not retain complete forecast payloads."""
     coordinator = _build_coordinator(
         data=HorizonIQSnapshot(
             forecast={
@@ -148,25 +149,24 @@ def test_forecast_detail_sensor_uses_forecast_payload() -> None:
     assert entity.native_value == 2
     assert attrs["environment"] == SANDBOX_ENVIRONMENT
     assert attrs["period_count"] == 2
-    assert attrs["forecast"] == {
-        "date": "2026-03-07T10:00:00+00:00",
-        "target_capacity": 55.0,
-        "periods": [
-            {"period": 1, "date": "2026-03-07T10:00:00+00:00"},
-            {"period": 2, "date": "2026-03-07T10:30:00+00:00"},
-        ],
+    assert attrs == {
+        "environment": SANDBOX_ENVIRONMENT,
+        "health": "Healthy",
+        "period_count": 2,
     }
-    assert attrs["registration"] == {
-        "id": "registration-7",
-        "ForecastCadenceMinutes": 5,
-        "DynamicCharging": True,
-        "Solar": {"CapacityKw": 4.2},
-    }
-    assert set(attrs) == {"environment", "period_count", "forecast", "registration"}
 
 
-def test_forecast_detail_sensor_redacts_trial_binding_values() -> None:
-    """Diagnostic attributes do not expose trial device tokens."""
+def test_sandbox_forecast_diagnostics_stays_available_without_coordinator_data() -> None:
+    """Sandbox diagnostics remains available from the loaded runtime default."""
+    coordinator = _build_coordinator(data=None, environment=SANDBOX_ENVIRONMENT)
+    entity = ForecastDetailSensor(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
+
+    assert entity.available is True
+    assert entity.native_value == 0
+
+
+def test_forecast_detail_sensor_never_exposes_forecast_payload_values() -> None:
+    """Diagnostic attributes do not expose trial bindings or payloads."""
     token = "portal-trial-token"
     device_id = "gx-device-1"
     function_key = "forecast-function-key"
@@ -214,24 +214,15 @@ def test_forecast_detail_sensor_redacts_trial_binding_values() -> None:
     assert device_id not in repr(attrs)
     assert function_key not in repr(attrs)
     assert registration_data not in repr(attrs)
-    assert attrs["forecast"]["forecast_device_token"] == "REDACTED"
-    assert attrs["forecast"]["forecast_function_key"] == "REDACTED"
-    assert attrs["forecast"]["registration_data"] == "REDACTED"
-    assert attrs["forecast"]["endpoint"] == (
-        "https://api.horizoniq.uk/api/Forecast_Get"
-        "?code=REDACTED&currentBatteryCapacity=50"
-    )
-    assert attrs["forecast"]["nested"]["trialDeviceToken"] == "REDACTED"
-    assert attrs["forecast"]["periods"][0]["deviceId"] == "REDACTED"
-    assert attrs["forecast"]["periods"][0]["trialDeviceToken"] == "REDACTED"
-    assert attrs["forecast"]["periods"][0]["registrationData"] == "REDACTED"
-    assert attrs["registration"]["id"] == "registration-7"
-    assert attrs["registration"]["deviceId"] == "REDACTED"
-    assert attrs["registration"]["trialDeviceToken"] == "REDACTED"
+    assert attrs == {
+        "environment": SANDBOX_ENVIRONMENT,
+        "health": "Healthy",
+        "period_count": 1,
+    }
 
 
-def test_forecast_detail_sensor_exposes_trial_state() -> None:
-    """Forecast diagnostics includes normalized trial state."""
+def test_forecast_detail_sensor_does_not_copy_trial_state() -> None:
+    """Forecast diagnostics keeps trial payloads out of state attributes."""
     coordinator = _build_coordinator(
         data=HorizonIQSnapshot(
             trial={
@@ -248,18 +239,15 @@ def test_forecast_detail_sensor_exposes_trial_state() -> None:
     attrs = entity.extra_state_attributes
 
     assert entity.native_value == 0
-    assert attrs["trial_status"] == "expired"
-    assert attrs["trial"] == {
-        "has_trial": True,
-        "is_active": False,
-        "is_eligible": False,
-        "status": "expired",
-        "forecast_cadence_minutes": 30,
+    assert attrs == {
+        "environment": SANDBOX_ENVIRONMENT,
+        "health": "Healthy",
+        "period_count": 0,
     }
 
 
-def test_forecast_detail_sensor_exposes_authorization_state() -> None:
-    """Forecast diagnostics includes authorization failures."""
+def test_forecast_detail_sensor_keeps_authorization_payload_out_of_state() -> None:
+    """Forecast diagnostics reports only bounded authorization failure context."""
     coordinator = _build_coordinator(
         data=HorizonIQSnapshot(
             trial={
@@ -276,15 +264,37 @@ def test_forecast_detail_sensor_exposes_authorization_state() -> None:
     attrs = entity.extra_state_attributes
 
     assert entity.native_value == 0
-    assert attrs["authorization_status"] == "unauthorized"
-    assert attrs["authorization_status_code"] == 401
-    assert attrs["trial"] == {
-        "authorization_status": "unauthorized",
-        "authorization_status_code": 401,
-        "authorization_message": (
-            "Forecast request was rejected with HTTP 401 Unauthorized."
-        ),
-    }
+    assert attrs["health"] == "Unauthorized"
+    assert attrs["period_count"] == 0
+    assert attrs["reason"] == "Forecast request was rejected with HTTP 401 Unauthorized."
+    assert "trial" not in attrs
+
+
+def test_forecast_detail_sensor_is_bounded_at_maximum_horizon() -> None:
+    """A maximum forecast horizon cannot create oversized state attributes."""
+    coordinator = _build_coordinator(
+        data=HorizonIQSnapshot(
+            forecast={
+                "created_at_utc": "2026-03-07T10:00:00+00:00",
+                "effective_at_utc": "2026-03-07T10:00:00+00:00",
+            },
+            forecast_periods=[
+                {
+                    "executable_action": "self_consumption",
+                    "decision_trace": {"response": "x" * 10_000},
+                }
+                for _ in range(1_488)
+            ],
+        )
+    )
+
+    entity = ForecastDetailSensor(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
+    attrs = entity.extra_state_attributes
+
+    assert attrs["period_count"] == 1_488
+    assert attrs["selected_action"] == "Self Consumption"
+    assert len(json.dumps(attrs)) < 8_192
+    assert entity._unrecorded_attributes == frozenset({"reason", "last_error"})
 
 
 def test_trial_status_sensor_exposes_trial_state() -> None:

@@ -131,7 +131,7 @@ async def test_unload_prevents_late_mqtt_callbacks_from_mutating_state(hass) -> 
 
 
 async def test_failed_mqtt_setup_cleans_up_only_its_runtime(hass) -> None:
-    """A subscription failure removes partial setup and resumes its coordinator."""
+    """A subscription failure leaves the local virtual runtime usable."""
     runtime, coordinator = _runtime()
     unsubscribe = MagicMock()
 
@@ -148,17 +148,19 @@ async def test_failed_mqtt_setup_cleans_up_only_its_runtime(hass) -> None:
             ]
         ),
     ):
-        with pytest.raises(RuntimeError, match="no broker"):
-            await runtime.async_enable(hass)
+        await runtime.async_enable(hass)
 
-    assert runtime.simulator_enabled is False
+    assert runtime.simulator_enabled is True
+    assert runtime._mqtt_emulation_enabled is False
     assert unsubscribe.call_count == 5
     coordinator.async_pause_for_sandbox.assert_awaited_once()
+    coordinator.async_resume_from_sandbox.assert_not_awaited()
+    await runtime.async_disable()
     coordinator.async_resume_from_sandbox.assert_awaited_once()
 
 
 async def test_mqtt_setup_is_coordinator_ordered_and_entry_local(hass) -> None:
-    """One unavailable MQTT setup resumes only the affected coordinator."""
+    """One unavailable MQTT setup leaves only its local transport disabled."""
     failed, failed_coordinator = _runtime()
     healthy, healthy_coordinator = _runtime(
         "22222222-2222-4222-8222-222222222222"
@@ -180,20 +182,19 @@ async def test_mqtt_setup_is_coordinator_ordered_and_entry_local(hass) -> None:
         "custom_components.horizoniq.sandbox_runtime.mqtt.async_subscribe",
         new=AsyncMock(side_effect=subscribe),
     ):
-        with pytest.raises(
-            RuntimeError,
-            match="Home Assistant MQTT integration is unavailable",
-        ):
-            await failed.async_enable(hass)
+        await failed.async_enable(hass)
         await healthy.async_enable(hass)
 
-    assert failed.simulator_enabled is False
-    failed_coordinator.async_resume_from_sandbox.assert_awaited_once()
+    assert failed.simulator_enabled is True
+    assert failed._mqtt_emulation_enabled is False
+    failed_coordinator.async_resume_from_sandbox.assert_not_awaited()
     assert healthy.simulator_enabled is True
     healthy_coordinator.async_resume_from_sandbox.assert_not_awaited()
     assert healthy_subscription_index == 7
 
+    await failed.async_disable()
     await healthy.async_disable()
+    failed_coordinator.async_resume_from_sandbox.assert_awaited_once()
     for unsubscribe in healthy_unsubscribers:
         unsubscribe.assert_called_once()
     healthy_coordinator.async_resume_from_sandbox.assert_awaited_once()

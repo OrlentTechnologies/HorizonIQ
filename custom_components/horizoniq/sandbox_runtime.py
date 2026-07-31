@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import math
@@ -23,6 +24,7 @@ from .const import (
     CONF_ENVIRONMENT,
     CONF_REGISTRATION_CONFIG,
     CONF_REGISTRATION_ID,
+    DOMAIN,
     SANDBOX_ENVIRONMENT,
     normalize_environment,
 )
@@ -324,7 +326,7 @@ class HorizonIQEntryRuntime:
     _task: asyncio.Task[None] | None = None
     _hass: HomeAssistant | None = None
     _coordinator_paused: bool = False
-    _mqtt_emulation_enabled: bool = False
+    _mqtt_emulation_enabled: bool = True
     _direct_forecast_health: str = "unavailable"
     _last_direct_command_id: str | None = None
     _staged_direct_forecast: Forecast | None = None
@@ -386,6 +388,11 @@ class HorizonIQEntryRuntime:
     def is_sandbox_configured(self) -> bool:
         """Return whether this entry has a valid virtual-battery configuration."""
         return self._config is not None and self.pretend_gx_id is not None
+
+    @property
+    def virtual_entity_available(self) -> bool:
+        """Return whether this loaded entry still owns its virtual entities."""
+        return self.is_sandbox_configured and not self._unloaded
 
     @property
     def energy_wh(self) -> float | None:
@@ -868,7 +875,7 @@ class HorizonIQEntryRuntime:
         return self._replay_session
 
     async def async_start_replay_session(self) -> ReplaySession:
-        """Start one direct HA replay without MQTT or Node-RED acknowledgements."""
+        """Start one replay request through the entry-local MQTT contract."""
         async with self._replay_start_lock:
             if (
                 self._replay_session is not None
@@ -883,34 +890,17 @@ class HorizonIQEntryRuntime:
                 raise ValueError("Sandbox runtime is unavailable")
             self._replay_session = start_replay_request(session)
             try:
-                payload = await self.coordinator.async_fetch_sandbox_replay(
-                    request.to_payload()
-                )
-                direct = parse_replay_command(
-                    payload,
-                    virtual_now_utc=self._clock.state.virtual_time_utc,
-                    config=self._config,
+                await self._async_publish_outbound(
+                    replay_request_topic(self.pretend_gx_id or ""),
+                    json.dumps(request.to_payload(), separators=(",", ":")),
                 )
             except asyncio.CancelledError:
                 raise
             except Exception:
-                self._replay_session = replace(
-                    self._replay_session,
-                    state=ReplayState.FAILED,
-                    last_remote_reason=_REPLAY_PUBLISH_FAILURE_REASON,
-                )
-                self._prepared_replay_request = None
-                await self.async_checkpoint(immediate=True)
-                await self._async_publish_runtime_statuses(force=True)
-                self._notify_listeners()
+                await self._async_fail_replay(_REPLAY_PUBLISH_FAILURE_REASON)
                 return self._replay_session
             self._prepared_replay_request = None
-            self._direct_replay_payload = payload
-            self._last_direct_replay_key = direct.replay_key
-            self._command = direct.command
-            self.last_command_status = CommandStatus.APPLIED
-            self.last_command_reason = direct.action
-            self._replay_session = replace(self._replay_session, state=ReplayState.RUNNING)
+            self._schedule_replay_timeout(self._replay_session.replay_id)
             await self.async_checkpoint(immediate=True)
             await self._async_publish_runtime_statuses(force=True)
             self._notify_listeners()
@@ -1033,6 +1023,8 @@ class HorizonIQEntryRuntime:
             raise ValueError("An enabled sandbox MQTT runtime is required")
         if not self.is_sandbox_configured:
             raise ValueError("Sandbox is unavailable")
+        if not self._mqtt_emulation_enabled:
+            raise ValueError("Sandbox MQTT transport is unavailable")
         if self._replay_session is not None and self._replay_session.state in (
             _REPLAY_ACTIVE_STATES | {ReplayState.RUNNING, ReplayState.PAUSED}
         ):
@@ -1221,6 +1213,7 @@ class HorizonIQEntryRuntime:
         )
         self._cancel_replay_heartbeat()
         await self._async_publish_replay_clock(immediate=True)
+        await self._async_publish_telemetry_snapshot()
         await self.async_checkpoint(immediate=True)
         await self._async_publish_runtime_statuses(force=True)
         self._notify_listeners()
@@ -1434,7 +1427,7 @@ class HorizonIQEntryRuntime:
             if restored_replay is not None
             else None
         )
-        self._replay_pending_resume = False
+        self._replay_pending_resume = restored_replay is not None
         self._replay_auto_resume_pending = False
         self._faults = restored_faults
         self._mqtt_fault_disconnected = False
@@ -1818,15 +1811,44 @@ class HorizonIQEntryRuntime:
         self.simulator_enabled = True
         self._hass = hass
         try:
+            await self.coordinator.async_pause_for_sandbox()
+            self._coordinator_paused = True
             self._subscribe_to_coordinator_forecasts()
+            subscription_start = len(self._unsubscribers)
+            try:
+                await self._async_subscribe_mqtt(hass)
+            except Exception as err:
+                # A missing broker must not disable the local virtual battery.
+                # Controls and simulation continue to work without its optional
+                # MQTT transport, and a later reconnect may restore it.
+                self._mqtt_emulation_enabled = False
+                for unsubscribe in self._unsubscribers[subscription_start:]:
+                    result = unsubscribe()
+                    if inspect.isawaitable(result):
+                        await result
+                del self._unsubscribers[subscription_start:]
+                _LOGGER.debug("Sandbox MQTT emulation is unavailable: %s", err)
+            else:
+                self._mqtt_emulation_enabled = True
             for fault in self._faults:
                 if fault.state is FaultState.ACTIVE:
                     self._schedule_fault_expiry(fault)
             await self._async_refresh_direct_forecast()
-            self._task = hass.async_create_task(self._async_loop(hass))
+            if self._mqtt_emulation_enabled:
+                await self._async_resume_pending_replay()
+            create_background_task = getattr(hass, "async_create_background_task", None)
+            if callable(create_background_task):
+                self._task = create_background_task(
+                    self._async_loop(hass),
+                    f"{DOMAIN} sandbox simulation {self.entry_id}",
+                )
+            else:
+                self._task = hass.async_create_task(self._async_loop(hass))
         except Exception:
             await self.async_disable()
             raise
+        await self._async_publish_telemetry_snapshot()
+        await self._async_publish_runtime_statuses(force=True)
         await self.async_checkpoint(immediate=True)
         self._notify_listeners()
 
@@ -1853,6 +1875,7 @@ class HorizonIQEntryRuntime:
         self._freeze_fault_durations()
         self._cancel_all_fault_work()
         self._mqtt_fault_disconnected = False
+        self._mqtt_emulation_enabled = False
         if self._replay_session is not None and self._replay_session.state in (
             _REPLAY_ACTIVE_STATES | {ReplayState.RUNNING, ReplayState.PAUSED}
         ):
@@ -1864,7 +1887,9 @@ class HorizonIQEntryRuntime:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         for unsubscribe in self._unsubscribers:
-            unsubscribe()
+            result = unsubscribe()
+            if inspect.isawaitable(result):
+                await result
         self._unsubscribers.clear()
         self._hass = None
         if self._coordinator_paused and resume_coordinator:
@@ -2275,6 +2300,14 @@ class HorizonIQEntryRuntime:
         if not self.simulator_enabled or self._config is None or self._clock is None:
             return
         async with self._direct_forecast_lock:
+            if forecast is None:
+                self._command = None
+                self.last_command_status = CommandStatus.FALLBACK_MISSING
+                self.last_command_reason = None
+                self._direct_forecast_health = "unavailable"
+                await self.async_checkpoint(immediate=True)
+                self._notify_listeners()
+                return
             live_now_utc = self._live_forecast_now()
             validation = validate_live_forecast(
                 forecast,
@@ -2456,7 +2489,9 @@ class HorizonIQEntryRuntime:
         self._mqtt_fault_disconnected = True
         self._command = Command(OperatingMode.SELF_CONSUMPTION)
         for unsubscribe in self._unsubscribers:
-            unsubscribe()
+            result = unsubscribe()
+            if inspect.isawaitable(result):
+                await result
         self._unsubscribers.clear()
         self._discard_delayed_outbound()
 
@@ -2474,9 +2509,13 @@ class HorizonIQEntryRuntime:
             return
         try:
             await self._async_subscribe_mqtt(hass)
-        except Exception:
-            await self.async_disable()
+        except Exception as err:
+            # The virtual runtime remains local and usable when MQTT cannot
+            # reconnect.  Transport recovery is independent of entity state.
+            self._mqtt_emulation_enabled = False
+            _LOGGER.debug("Sandbox MQTT reconnection is unavailable: %s", err)
             return
+        self._mqtt_emulation_enabled = True
         await self._async_publish_runtime_statuses(force=True)
 
     def _cancel_fault_work(self, fault_id: str) -> None:
@@ -2505,7 +2544,7 @@ class HorizonIQEntryRuntime:
 
     def _freeze_fault_durations(self) -> None:
         """Stop timed faults without charging time while this runtime is disabled."""
-        if self._hass is None:
+        if self._hass is None or not hasattr(self._hass, "loop"):
             return
         now = self._hass.loop.time()
         self._faults = tuple(

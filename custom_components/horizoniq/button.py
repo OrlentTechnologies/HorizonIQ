@@ -88,8 +88,8 @@ class _SandboxButton(ButtonEntity):
 
     @property
     def available(self) -> bool:
-        """Operational controls are available only while their sandbox is active."""
-        return self._runtime.simulator_enabled
+        """Keep actions visible while their loaded runtime owns the device."""
+        return self._runtime.virtual_entity_available
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -136,10 +136,6 @@ class SandboxResetProfileButton(_SandboxButton):
 
     def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str) -> None:
         super().__init__(runtime, entry_id, "profile_reset")
-
-    @property
-    def available(self) -> bool:
-        return super().available and self._runtime.selected_profile_filename is not None
 
     async def async_press(self) -> None:
         await self._runtime.async_reset_playback()

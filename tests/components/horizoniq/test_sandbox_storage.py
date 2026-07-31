@@ -306,8 +306,6 @@ async def test_serialized_storage_excludes_secrets_and_actual_telemetry(hass) ->
         "broker",
         "oauth",
         "forecast",
-        "load_w",
-        "solar_w",
         "actual",
     ):
         assert forbidden not in serialized

@@ -147,8 +147,8 @@ class SandboxRuntimeSensor(SensorEntity):
 
     @property
     def available(self) -> bool:
-        """Keep status visible while operational readings follow lifecycle state."""
-        return self._key == "status" or self._runtime.simulator_enabled
+        """Keep persisted virtual-battery state visible while simulation is stopped."""
+        return self._runtime.virtual_entity_available
 
     @property
     def native_value(self) -> str | float | None:
@@ -228,8 +228,9 @@ def _friendly_state(value: str | None) -> str | None:
     """Make machine-readable status values suitable for the UI."""
     if value is None or not value:
         return value
-    if all(character.islower() or character in {"_", "-"} for character in value):
-        return value.replace("_", " ").replace("-", " ").title()
+    if all(character.islower() or character in {"_", "-", ":"} for character in value):
+        readable_value = value.replace("_", " ").replace("-", " ").replace(":", ": ")
+        return readable_value[:1].upper() + readable_value[1:]
     return value
 
 

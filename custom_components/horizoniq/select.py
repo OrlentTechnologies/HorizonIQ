@@ -50,8 +50,8 @@ class _SandboxSelect(SelectEntity):
 
     @property
     def available(self) -> bool:
-        """Selections only control an active virtual device."""
-        return self._runtime.simulator_enabled
+        """Keep selections visible while their loaded runtime owns the device."""
+        return self._runtime.virtual_entity_available
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -148,11 +148,6 @@ class SandboxEquipmentProfileSelect(_SandboxSelect):
     @property
     def current_option(self) -> str:
         return self._runtime.equipment_profile_name
-
-    @property
-    def available(self) -> bool:
-        """The registration-owned equipment profile is informational only."""
-        return False
 
     async def async_select_option(self, option: str) -> None:
         if option != self._runtime.equipment_profile_name:

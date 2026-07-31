@@ -77,7 +77,7 @@ Behavior:
 Behavior:
 - Monetary sensors read values from API payload keys like `TotalCost`, `ChargingCost`, `Saving`.
 - Currency is taken from API (`currency`, `Currency`, etc.) when present.
-- Forecast Diagnostics state is the number of forecast periods and its attributes include trial status details when returned by the API.
+- Forecast Diagnostics state is the number of forecast periods and its attributes contain only a bounded health, action, timestamp, reason, and error summary. It never includes forecast periods, requests, responses, traces, or credentials.
 - BMS State is derived from top-level forecast state, otherwise current/upcoming period state.
 - Trial Status reads app-trial fields like `hasTrial`, `isActive`, `isEligible`, `status`, `startsOnUtc`, `expiresOnUtc`, and `deviceDisplayName`. If the forecast endpoint returns HTTP 401, the integration still loads and the sensor shows `unauthorized` with authorization diagnostics.
 

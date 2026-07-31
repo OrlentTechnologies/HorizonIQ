@@ -48,6 +48,11 @@ class SandboxEnableSwitch(SwitchEntity):
         return virtual_battery_device_info(self._runtime.pretend_gx_id)
 
     @property
+    def available(self) -> bool:
+        """The simulation switch remains available for every loaded runtime."""
+        return self._runtime.virtual_entity_available
+
+    @property
     def is_on(self) -> bool:
         """Return whether this entry's simulation loop is active."""
         return self._runtime.simulator_enabled
@@ -84,7 +89,7 @@ class SandboxProfilePlaybackSwitch(SwitchEntity):
 
     @property
     def available(self) -> bool:
-        return self._runtime.simulator_enabled and self._runtime.selected_profile_filename is not None
+        return self._runtime.virtual_entity_available
 
     @property
     def is_on(self) -> bool:

@@ -98,10 +98,8 @@ class SandboxNumber(NumberEntity):
 
     @property
     def available(self) -> bool:
-        """Manual operating controls cannot alter an inactive sandbox."""
-        if self._description.key == "set_state_of_charge":
-            return self._runtime.can_set_state_of_charge
-        return self._runtime.simulator_enabled
+        """Keep controls present while their loaded runtime owns the device."""
+        return self._runtime.virtual_entity_available
 
     @property
     def native_value(self) -> float | None:

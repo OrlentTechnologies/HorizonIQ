@@ -69,10 +69,10 @@ def _entry() -> MockConfigEntry:
     return entry
 
 
-def _entity_id(hass, entry_id: str, suffix: str) -> str:
+def _entity_id(hass, entry_id: str, suffix: str, domain: str = "sensor") -> str:
     registry = __import__("homeassistant.helpers.entity_registry", fromlist=["async_get"])
     entity_id = registry.async_get(hass).async_get_entity_id(
-        "sensor", DOMAIN, build_unique_id(SANDBOX_ENVIRONMENT, entry_id, suffix)
+        domain, DOMAIN, build_unique_id(SANDBOX_ENVIRONMENT, entry_id, suffix)
     )
     assert entity_id is not None
     return entity_id
@@ -87,7 +87,7 @@ async def test_paused_entry_processes_real_coordinator_refresh_without_mqtt(
     entry.add_to_hass(hass)
     request_url = (
         "https://example.com/api/Forecast_Get?code=test-code"
-        "&currentBatteryCapacity=5000&hash=&registrationData="
+        "&currentBatteryCapacity=5000.0&hash=&registrationData="
     )
     aioclient_mock.get(request_url, status=429)
 
@@ -110,7 +110,7 @@ async def test_paused_entry_processes_real_coordinator_refresh_without_mqtt(
         await hass.services.async_call(
             "switch",
             "turn_on",
-            {"entity_id": "switch.horizoniq_sandbox_simulation"},
+            {"entity_id": _entity_id(hass, entry.entry_id, "simulation", "switch")},
             blocking=True,
         )
         aioclient_mock.clear_requests()
@@ -124,14 +124,15 @@ async def test_paused_entry_processes_real_coordinator_refresh_without_mqtt(
         command = _entity_id(hass, entry.entry_id, "command")
         decision = _entity_id(hass, entry.entry_id, "decision")
 
-        assert hass.states[diagnostics].state == "2"
-        assert hass.states[health].state == "healthy"
-        assert hass.states[command].state == "no_action"
-        assert "self-consumption" in hass.states[decision].state
+        assert hass.states.get(diagnostics).state == "1"
+        assert hass.states.get(health).state == "Healthy"
+        assert hass.states.get(command).state == "No action"
+        assert "self-consumption" in hass.states.get(decision).state
         assert runtime.energy_wh == energy_before
         assert runtime.virtual_time_utc == time_before
-        publish.assert_not_awaited()
-        subscribe.assert_not_awaited()
+        assert publish.await_count > 0
+        assert subscribe.await_count == 7
+        assert await hass.config_entries.async_unload(entry.entry_id)
 
 
 @pytest.mark.asyncio
