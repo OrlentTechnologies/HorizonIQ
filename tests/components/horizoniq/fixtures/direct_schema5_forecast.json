@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 5,
+  "planId": "a2b2eb79-6a79-469f-ac10-df23a9532685",
+  "planKind": "live",
+  "createdAtUtc": "2026-07-30T11:59:58Z",
+  "effectiveAtUtc": "2026-07-30T12:00:00Z",
+  "equipmentProfile": {
+    "id": "sandbox-virtual-battery-v1",
+    "version": 3,
+    "source": "registration",
+    "displayName": "Sandbox virtual battery",
+    "batteryCapacityWh": 28800,
+    "minimumCapacityPercentage": 0.2,
+    "maximumBatteryChargePowerWatts": 4000,
+    "maximumBatteryDischargePowerWatts": 4000,
+    "inverterMaximumChargePowerWatts": 3600,
+    "inverterMaximumDischargePowerWatts": 3600,
+    "maximumGridImportPowerWatts": 3000,
+    "maximumGridExportPowerWatts": 3000,
+    "controlAdapterId": "home-assistant-virtual-battery",
+    "supportedControl": {
+      "requiredCharging": true,
+      "useGrid": true,
+      "importForExport": true,
+      "profitableExport": false,
+      "solarHeadroomExport": false
+    },
+    "productionExportEnabled": false,
+    "safeFallbackId": "self-consumption-only"
+  },
+  "hash": "forecast-hash-v5-opaque",
+  "registrationData": "encrypted-registration-data-opaque",
+  "forecastCadenceMinutes": 5,
+  "periods": [
+    {
+      "date": "2026-07-30T12:00:00Z",
+      "executableAction": "charge_required",
+      "simulationAction": "none",
+      "recommendedAction": "charge_required",
+      "commandId": "2ba6e42d-f820-4f5c-9b72-2455516684da",
+      "issuedAtUtc": "2026-07-30T11:59:58Z",
+      "expiresAtUtc": "2026-07-30T12:30:00Z",
+      "actionPriority": 1,
+      "expectedImport": 2.0,
+      "expectedExport": 0.0,
+      "expectedStartSoc": 14.4,
+      "expectedEndSoc": 16.3,
+      "decisionTrace": {
+        "reason": "required-charge-window",
+        "profileVersion": 3
+      }
+    },
+    {
+      "date": "2026-07-30T12:30:00Z",
+      "executableAction": "none",
+      "simulationAction": "none",
+      "recommendedAction": "self_consumption",
+      "expectedImport": 0.0,
+      "expectedExport": 0.0,
+      "expectedStartSoc": 16.3,
+      "expectedEndSoc": 16.3,
+      "decisionTrace": {
+        "reason": "no-executable-action",
+        "profileVersion": 3
+      }
+    }
+  ]
+}

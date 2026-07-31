@@ -8,6 +8,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_entry_oauth2_flow
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 
@@ -77,6 +78,7 @@ _ENTRY_KEYS = (
     CONF_URL,
     CONF_API_KEY,
     CONF_BATTERY_CAPACITY_SENSOR,
+    CONF_CAPACITY_SOURCE,
     CONF_ENVIRONMENT,
     CONF_HASH,
     CONF_REGISTRATION_DATA,
@@ -239,13 +241,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         registration_id=registration_id,
         entry_id=entry.entry_id,
     )
-    runtime.configure_sandbox(entry.data)
+    runtime.configure_sandbox({**entry.data, **config_data})
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+    _async_ensure_sandbox_device(hass=hass, entry=entry, runtime=runtime)
     await runtime.async_restore_storage(hass)
     await coordinator.async_refresh()
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+def _async_ensure_sandbox_device(
+    *,
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    runtime: HorizonIQEntryRuntime,
+) -> None:
+    """Create the persistent device owned by a configured virtual battery."""
+    if not runtime.is_sandbox_configured or runtime.pretend_gx_id is None:
+        return
+
+    dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, runtime.pretend_gx_id)},
+        name="HorizonIQ Virtual Battery",
+        manufacturer="HorizonIQ",
+        model="Sandbox virtual battery",
+    )
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

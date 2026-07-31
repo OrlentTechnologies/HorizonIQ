@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from typing import Final
+import math
 
 import voluptuous as vol
 
@@ -18,6 +19,19 @@ _SETUP_KEY: Final = f"{DOMAIN}_sandbox_services_registered"
 _ENTRY_ID = vol.Required("entry_id")
 _NAME = vol.Required("name")
 _FAULT_ID = vol.Required("fault_id")
+
+
+def _finite_percentage(value: object) -> float:
+    """Reject boolean and non-finite values before entry-local validation."""
+    if isinstance(value, bool):
+        raise vol.Invalid("state_of_charge must be a finite percentage")
+    try:
+        percentage = float(value)
+    except (TypeError, ValueError) as err:
+        raise vol.Invalid("state_of_charge must be a finite percentage") from err
+    if not math.isfinite(percentage):
+        raise vol.Invalid("state_of_charge must be a finite percentage")
+    return percentage
 
 
 def _runtime(hass: HomeAssistant, entry_id: str) -> HorizonIQEntryRuntime:
@@ -56,6 +70,13 @@ async def _async_step(hass: HomeAssistant, call: ServiceCall) -> None:
 async def _async_reset(hass: HomeAssistant, call: ServiceCall) -> None:
     await _runtime(hass, call.data["entry_id"]).async_reset(
         energy_wh=call.data.get("energy_wh")
+    )
+
+
+async def _async_set_state_of_charge(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Set the stored energy of exactly one active virtual sandbox."""
+    await _runtime(hass, call.data["entry_id"]).async_set_state_of_charge(
+        call.data["state_of_charge"]
     )
 
 
@@ -136,6 +157,7 @@ def async_setup_services(hass: HomeAssistant) -> None:
     hass.services.async_register(DOMAIN, "reset_profile", _service_handler(hass, _async_reset_profile), schema=entry_schema)
     hass.services.async_register(DOMAIN, "step", _service_handler(hass, _async_step), schema=vol.Schema({_ENTRY_ID: str, vol.Optional("seconds"): vol.All(vol.Coerce(float), vol.Range(min=0.001, max=86_400))}))
     hass.services.async_register(DOMAIN, "reset", _service_handler(hass, _async_reset), schema=vol.Schema({_ENTRY_ID: str, vol.Optional("energy_wh"): vol.All(vol.Coerce(float), vol.Range(min=0, max=MAX_BATTERY_ENERGY_WH))}))
+    hass.services.async_register(DOMAIN, "set_virtual_battery_state_of_charge", _service_handler(hass, _async_set_state_of_charge), schema=vol.Schema({_ENTRY_ID: str, vol.Required("state_of_charge"): _finite_percentage}))
     hass.services.async_register(DOMAIN, "snapshot_create", _service_handler(hass, _async_snapshot_create), schema=vol.Schema({_ENTRY_ID: str, _NAME: str, vol.Optional("replace", default=False): bool}))
     hass.services.async_register(DOMAIN, "snapshot_list", _service_handler(hass, _async_snapshot_list), schema=entry_schema, supports_response=SupportsResponse.ONLY)
     hass.services.async_register(DOMAIN, "snapshot_restore", _service_handler(hass, _async_snapshot_restore), schema=named_schema)

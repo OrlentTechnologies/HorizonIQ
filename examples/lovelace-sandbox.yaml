@@ -15,6 +15,7 @@ card:
     - number.horizoniq_virtual_battery_solar_generation
     - number.horizoniq_virtual_battery_battery_capacity
     - number.horizoniq_virtual_battery_battery_reserve
+    - number.horizoniq_virtual_battery_set_state_of_charge
     - sensor.horizoniq_virtual_battery_state_of_charge
     - sensor.horizoniq_virtual_battery_energy
     - sensor.horizoniq_virtual_battery_battery_power

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DEFAULT_ENVIRONMENT, DOMAIN
@@ -14,6 +15,7 @@ from .entity_helpers import (
     entity_name,
     environment_label,
     normalized_environment,
+    virtual_battery_device_info,
 )
 from .sandbox_runtime import HorizonIQEntryRuntime
 
@@ -88,6 +90,12 @@ class _SandboxButton(ButtonEntity):
     def available(self) -> bool:
         """Operational controls are available only while their sandbox is active."""
         return self._runtime.simulator_enabled
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Associate each sandbox action with its entry-owned virtual battery."""
+        assert self._runtime.pretend_gx_id is not None
+        return virtual_battery_device_info(self._runtime.pretend_gx_id)
 
     async def async_will_remove_from_hass(self) -> None:
         """Remove the entry-local runtime callback."""

@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from homeassistant.helpers.entity import EntityCategory
+
 from homeassistant.exceptions import HomeAssistantError
 from custom_components.horizoniq.const import (
     CAPACITY_SOURCE_VIRTUAL_BATTERY,
@@ -17,8 +19,21 @@ from custom_components.horizoniq.const import (
     SANDBOX_ENVIRONMENT,
 )
 from custom_components.horizoniq.sandbox_runtime import HorizonIQEntryRuntime
+from custom_components.horizoniq.number import SandboxNumber, _CONTROLS
 from custom_components.horizoniq.services import async_setup_services
-from custom_components.horizoniq.sensors import SandboxRuntimeSensor
+from custom_components.horizoniq.select import (
+    SandboxEquipmentProfileSelect,
+    SandboxFaultKindSelect,
+    SandboxProfileSelect,
+)
+from custom_components.horizoniq.sensors import (
+    SandboxRuntimeSensor,
+    _sandbox_entities,
+)
+from custom_components.horizoniq.simulation.models import (
+    CommandStatus,
+    IntervalLedger,
+)
 
 
 REGISTRATION_ID = "11111111-1111-4111-8111-111111111111"
@@ -88,7 +103,7 @@ async def test_manual_controls_persist_and_status_entities_are_entry_local(hass)
     balance = SandboxRuntimeSensor(runtime, runtime.entry_id, "balance_error", "Balance")
     decision = SandboxRuntimeSensor(runtime, runtime.entry_id, "decision", "Decision")
     assert balance.native_value == 0
-    assert decision.native_value == "fallback_missing"
+    assert decision.native_value == "Fallback missing"
     assert balance.extra_state_attributes["ledger"]["grid_import_wh"] == 0
     balance._remove_listener()
     decision._remove_listener()
@@ -99,6 +114,88 @@ async def test_manual_controls_persist_and_status_entities_are_entry_local(hass)
     assert reloaded.capacity_wh == 12_000
     assert reloaded.reserve_wh == 2_500
     assert reloaded.charge_efficiency == 0.92
+
+
+async def test_virtual_battery_ui_formats_states_and_categories(hass) -> None:
+    """Virtual-battery states remain readable without changing their IDs."""
+    runtime = _runtime()
+    await runtime.async_restore_storage(hass)
+    await _enable(hass, runtime)
+    await runtime.async_set_state_of_charge(66.666)
+    runtime._last_battery_power_w = 123.456
+    runtime._last_grid_power_w = -456.789
+    runtime._cumulative_ledger = IntervalLedger(
+        grid_import_wh=12.345,
+        manual_adjustment_wh=1_666.6,
+        balance_error_wh=0.123,
+    )
+    runtime.last_command_status = CommandStatus.NO_ACTION
+    runtime.last_command_reason = "stale_telemetry"
+
+    sensors = {sensor._key: sensor for sensor in _sandbox_entities(runtime, runtime.entry_id)}
+    assert sensors["soc"].native_value == 66.7
+    assert sensors["energy"].native_value == 6666.6
+    assert sensors["battery_power"].native_value == 123.5
+    assert sensors["grid_power"].native_value == -456.8
+    assert sensors["balance_error"].native_value == 0.1
+    assert sensors["command"].native_value == "No action"
+    assert sensors["decision"].native_value == "Stale telemetry"
+    assert sensors["soc"].extra_state_attributes["profile"] == "Not selected"
+    assert sensors["soc"].extra_state_attributes["ledger"]["grid_import_wh"] == 12.3
+
+    diagnostic_keys = {
+        "mqtt",
+        "forecast",
+        "command",
+        "decision",
+        "health",
+        "balance_error",
+        "profile_cursor",
+        "faults",
+    }
+    for key, sensor in sensors.items():
+        expected = EntityCategory.DIAGNOSTIC if key in diagnostic_keys else None
+        assert sensor.entity_category is expected
+        sensor._remove_listener()
+
+    await runtime.async_disable()
+
+
+def test_state_of_charge_control_availability_follows_runtime(hass) -> None:
+    """The editable SoC control is disabled while playback owns the battery."""
+    runtime = _runtime()
+    description = next(item for item in _CONTROLS if item.key == "set_state_of_charge")
+    number = SandboxNumber(runtime, runtime.entry_id, description)
+
+    assert number.available is False
+    runtime.simulator_enabled = True
+    assert number.available is True
+    runtime._playback_state = "running"
+    assert number.available is False
+    number._remove_listener()
+
+
+def test_fault_selector_uses_friendly_enum_labels(hass) -> None:
+    """Fault selection keeps runtime enum values out of the visible UI."""
+    runtime = _runtime()
+    selector = SandboxFaultKindSelect(runtime, runtime.entry_id)
+
+    assert selector.current_option == "Stale Telemetry"
+    assert "Stale Telemetry" in selector.options
+    selector._remove_listener()
+
+
+def test_profile_controls_expose_selection_state_and_availability(hass) -> None:
+    """Profile controls do not expose unknown or a non-operable selector."""
+    runtime = _runtime()
+    profile = SandboxProfileSelect(runtime, runtime.entry_id)
+    equipment = SandboxEquipmentProfileSelect(runtime, runtime.entry_id)
+
+    assert profile.current_option == "Not selected"
+    assert "Not selected" in profile.options
+    assert equipment.available is False
+    profile._remove_listener()
+    equipment._remove_listener()
 
 
 async def test_manual_control_and_input_bounds_match_the_mqtt_contract(hass) -> None:

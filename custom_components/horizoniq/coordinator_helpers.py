@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 import json
+import math
 
 from .models import (
     ForecastData,
+    Forecast,
     ForecastPeriod,
+    DirectEquipmentProfile,
+    DirectForecastPeriod,
+    EquipmentProfile,
     HorizonIQSnapshot,
     RegistrationData,
     TrialData,
@@ -59,6 +64,20 @@ def normalize_periods(payload: Mapping[str, object] | None) -> list[ForecastPeri
             "period",
             _coerce_int(extract_first(item, ("Period", "period", "index"))),
         )
+        _add_if_value(period, "executable_action", _coerce_str(extract_first(item, ("executableAction", "executable_action"))))
+        _add_if_value(period, "simulation_action", _coerce_str(extract_first(item, ("simulationAction", "simulation_action"))))
+        _add_if_value(period, "recommended_action", _coerce_str(extract_first(item, ("recommendedAction", "recommended_action"))))
+        _add_if_value(period, "command_id", _coerce_str(extract_first(item, ("commandId", "command_id"))))
+        _add_if_value(period, "issued_at_utc", _coerce_datetime(extract_first(item, ("issuedAtUtc", "issued_at_utc"))))
+        _add_if_value(period, "expires_at_utc", _coerce_datetime(extract_first(item, ("expiresAtUtc", "expires_at_utc"))))
+        _add_if_value(period, "action_priority", _coerce_int(extract_first(item, ("actionPriority", "action_priority"))))
+        _add_if_value(period, "expected_import", _coerce_float(extract_first(item, ("expectedImport", "expected_import"))))
+        _add_if_value(period, "expected_export", _coerce_float(extract_first(item, ("expectedExport", "expected_export"))))
+        _add_if_value(period, "expected_start_soc", _coerce_float(extract_first(item, ("expectedStartSoc", "expected_start_soc"))))
+        _add_if_value(period, "expected_end_soc", _coerce_float(extract_first(item, ("expectedEndSoc", "expected_end_soc"))))
+        decision_trace = extract_first(item, ("decisionTrace", "decision_trace"))
+        if isinstance(decision_trace, Mapping):
+            period["decision_trace"] = dict(decision_trace)
         _add_if_value(
             period,
             "date",
@@ -163,6 +182,14 @@ def normalize_forecast(payload: Mapping[str, object] | None) -> ForecastData:
         "id",
         _coerce_str(extract_first(forecast_source, ("Id", "id"))),
     )
+    _add_if_value(normalized, "schema_version", _coerce_int(extract_first(forecast_source, ("schemaVersion", "schema_version"))))
+    _add_if_value(normalized, "plan_id", _coerce_str(extract_first(forecast_source, ("planId", "plan_id"))))
+    _add_if_value(normalized, "plan_kind", _coerce_str(extract_first(forecast_source, ("planKind", "plan_kind"))))
+    _add_if_value(normalized, "created_at_utc", _coerce_datetime(extract_first(forecast_source, ("createdAtUtc", "created_at_utc"))))
+    _add_if_value(normalized, "effective_at_utc", _coerce_datetime(extract_first(forecast_source, ("effectiveAtUtc", "effective_at_utc"))))
+    equipment_profile = extract_first(forecast_source, ("equipmentProfile", "equipment_profile"))
+    if isinstance(equipment_profile, Mapping):
+        normalized["equipment_profile"] = dict(equipment_profile)
     _add_if_value(
         normalized,
         "registration_id",
@@ -345,6 +372,186 @@ def normalize_forecast(payload: Mapping[str, object] | None) -> ForecastData:
     return normalized
 
 
+def normalize_direct_forecast(forecast: ForecastData) -> Forecast | None:
+    """Create the sole typed schema-5 control model from normalized coordinator data."""
+    try:
+        profile_source = forecast["equipment_profile"]
+        profile = _normalize_direct_equipment_profile(profile_source)
+        periods_source = forecast["periods"]
+        if not isinstance(periods_source, list) or not periods_source:
+            raise ValueError("periods")
+        periods = tuple(_normalize_direct_period(period) for period in periods_source)
+        return Forecast(
+            schema_version=_direct_int(forecast["schema_version"], "schema_version"),
+            plan_id=_direct_text(forecast["plan_id"], "plan_id"),
+            plan_kind=_direct_text(forecast["plan_kind"], "plan_kind"),
+            created_at_utc=_direct_timestamp(forecast["created_at_utc"], "created_at_utc"),
+            effective_at_utc=_direct_timestamp(
+                forecast["effective_at_utc"], "effective_at_utc"
+            ),
+            equipment_profile=profile,
+            hash_value=_direct_text(forecast["hash"], "hash"),
+            registration_data=_direct_text(
+                forecast["registration_data"], "registration_data"
+            ),
+            forecast_cadence_minutes=_direct_int(
+                forecast["forecast_cadence_minutes"], "forecast_cadence_minutes"
+            ),
+            periods=periods,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _normalize_direct_equipment_profile(
+    source: EquipmentProfile,
+) -> DirectEquipmentProfile:
+    controls = source.get("supportedControl")
+    if not isinstance(controls, Mapping):
+        raise ValueError("supportedControl")
+    return DirectEquipmentProfile(
+        identifier=_direct_text(source.get("id"), "equipmentProfile.id"),
+        version=_direct_int(source.get("version"), "equipmentProfile.version"),
+        source=_direct_text(source.get("source"), "equipmentProfile.source"),
+        display_name=_direct_text(
+            source.get("displayName"), "equipmentProfile.displayName"
+        ),
+        battery_capacity_wh=_direct_float(
+            source.get("batteryCapacityWh"), "equipmentProfile.batteryCapacityWh"
+        ),
+        minimum_capacity_percentage=_direct_float(
+            source.get("minimumCapacityPercentage"),
+            "equipmentProfile.minimumCapacityPercentage",
+        ),
+        maximum_battery_charge_power_watts=_direct_float(
+            source.get("maximumBatteryChargePowerWatts"),
+            "equipmentProfile.maximumBatteryChargePowerWatts",
+        ),
+        maximum_battery_discharge_power_watts=_direct_float(
+            source.get("maximumBatteryDischargePowerWatts"),
+            "equipmentProfile.maximumBatteryDischargePowerWatts",
+        ),
+        inverter_maximum_charge_power_watts=_direct_float(
+            source.get("inverterMaximumChargePowerWatts"),
+            "equipmentProfile.inverterMaximumChargePowerWatts",
+        ),
+        inverter_maximum_discharge_power_watts=_direct_float(
+            source.get("inverterMaximumDischargePowerWatts"),
+            "equipmentProfile.inverterMaximumDischargePowerWatts",
+        ),
+        maximum_grid_import_power_watts=_direct_float(
+            source.get("maximumGridImportPowerWatts"),
+            "equipmentProfile.maximumGridImportPowerWatts",
+        ),
+        maximum_grid_export_power_watts=_direct_float(
+            source.get("maximumGridExportPowerWatts"),
+            "equipmentProfile.maximumGridExportPowerWatts",
+        ),
+        control_adapter_id=_direct_text(
+            source.get("controlAdapterId"), "equipmentProfile.controlAdapterId"
+        ),
+        required_charging=_direct_bool(
+            controls.get("requiredCharging"), "supportedControl.requiredCharging"
+        ),
+        use_grid=_direct_bool(controls.get("useGrid"), "supportedControl.useGrid"),
+        import_for_export=_direct_bool(
+            controls.get("importForExport"), "supportedControl.importForExport"
+        ),
+        profitable_export=_direct_bool(
+            controls.get("profitableExport"), "supportedControl.profitableExport"
+        ),
+        solar_headroom_export=_direct_bool(
+            controls.get("solarHeadroomExport"),
+            "supportedControl.solarHeadroomExport",
+        ),
+        production_export_enabled=_direct_bool(
+            source.get("productionExportEnabled"),
+            "equipmentProfile.productionExportEnabled",
+        ),
+        safe_fallback_id=_direct_text(
+            source.get("safeFallbackId"), "equipmentProfile.safeFallbackId"
+        ),
+    )
+
+
+def _normalize_direct_period(source: ForecastPeriod) -> DirectForecastPeriod:
+    return DirectForecastPeriod(
+        starts_at_utc=_direct_timestamp(source.get("date"), "date"),
+        executable_action=_direct_text(
+            source.get("executable_action"), "executable_action"
+        ),
+        simulation_action=_direct_optional_text(source.get("simulation_action")),
+        recommended_action=_direct_optional_text(source.get("recommended_action")),
+        command_id=_direct_optional_text(source.get("command_id")),
+        issued_at_utc=_direct_optional_timestamp(source.get("issued_at_utc")),
+        expires_at_utc=_direct_optional_timestamp(source.get("expires_at_utc")),
+        action_priority=_direct_optional_int(source.get("action_priority")),
+        expected_import_kwh=_direct_optional_float(source.get("expected_import")),
+        expected_export_kwh=_direct_optional_float(source.get("expected_export")),
+        expected_start_soc_kwh=_direct_optional_float(source.get("expected_start_soc")),
+        expected_end_soc_kwh=_direct_optional_float(source.get("expected_end_soc")),
+        decision_trace=(
+            dict(source["decision_trace"])
+            if isinstance(source.get("decision_trace"), Mapping)
+            else None
+        ),
+    )
+
+
+def _direct_text(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(name)
+    return value.strip()
+
+
+def _direct_optional_text(value: object) -> str | None:
+    return _direct_text(value, "value") if value is not None else None
+
+
+def _direct_int(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(name)
+    return value
+
+
+def _direct_optional_int(value: object) -> int | None:
+    return _direct_int(value, "value") if value is not None else None
+
+
+def _direct_float(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(name)
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(name)
+    return result
+
+
+def _direct_optional_float(value: object) -> float | None:
+    return _direct_float(value, "value") if value is not None else None
+
+
+def _direct_bool(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(name)
+    return value
+
+
+def _direct_timestamp(value: object, name: str) -> datetime:
+    text = _direct_text(value, name)
+    if not text.endswith("Z"):
+        raise ValueError(name)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as err:
+        raise ValueError(name) from err
+    return parsed.astimezone(timezone.utc)
+
+
+def _direct_optional_timestamp(value: object) -> datetime | None:
+    return _direct_timestamp(value, "value") if value is not None else None
+
+
 def normalize_trial(payload: Mapping[str, object] | None) -> TrialData:
     """Normalize app-trial metadata from forecast or trial payload containers."""
     if not isinstance(payload, Mapping):
@@ -500,9 +707,11 @@ def build_snapshot(payload: Mapping[str, object] | None) -> HorizonIQSnapshot:
         "forecast_cadence_minutes",
         top_level_forecast_cadence_minutes,
     )
+    direct_forecast = normalize_direct_forecast(forecast)
 
     return HorizonIQSnapshot(
         forecast=forecast,
+        direct_forecast=direct_forecast,
         trial=trial,
         forecast_periods=periods,
         registration=registration,

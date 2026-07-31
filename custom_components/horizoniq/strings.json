@@ -107,6 +107,7 @@
     "reset_profile": {"name": "Reset sandbox profile", "description": "Reset the selected profile cursor."},
     "step": {"name": "Step sandbox", "description": "Advance one active sandbox by virtual seconds."},
     "reset": {"name": "Reset sandbox", "description": "Reset one sandbox battery and virtual clock."},
+    "set_virtual_battery_state_of_charge": {"name": "Set virtual battery state of charge", "description": "Set stored energy for one active virtual Sandbox from its reserve through 100%.", "fields": {"entry_id": {"name": "Config entry ID"}, "state_of_charge": {"name": "State of charge"}}},
     "snapshot_create": {"name": "Create sandbox snapshot", "description": "Save an entry-local reproducible snapshot."},
     "snapshot_list": {"name": "List sandbox snapshots", "description": "Return snapshot names for one sandbox."},
     "snapshot_restore": {"name": "Restore sandbox snapshot", "description": "Restore one entry-local snapshot."},

@@ -5,14 +5,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.loader import async_get_integration
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.horizoniq import async_migrate_entry, async_setup_entry
+from custom_components.horizoniq import (
+    async_migrate_entry,
+    async_setup_entry,
+    async_unload_entry,
+)
 from custom_components.horizoniq.const import (
     CONF_API_KEY,
     CONF_BATTERY_CAPACITY_SENSOR,
+    CONF_CAPACITY_SOURCE,
     CONF_CAN_FORECAST,
     CONF_ENVIRONMENT,
     CONF_FORECAST_DEVICE_ID,
@@ -20,10 +26,12 @@ from custom_components.horizoniq.const import (
     CONF_GX_DEVICE_ID,
     CONF_HASH,
     CONF_REGISTRATION_DATA,
+    CONF_REGISTRATION_CONFIG,
     CONF_REGISTRATION_ID,
     CONF_SUBSCRIPTION_STATUS,
     CONF_URL,
     DEFAULT_ENVIRONMENT,
+    CAPACITY_SOURCE_VIRTUAL_BATTERY,
     DOMAIN,
     PLATFORMS,
     SANDBOX_ENVIRONMENT,
@@ -31,6 +39,7 @@ from custom_components.horizoniq.const import (
 )
 from custom_components.horizoniq.entry_data import CONF_OAUTH_RUNTIME
 from custom_components.horizoniq.entity_helpers import build_unique_id
+from custom_components.horizoniq.sandbox_runtime import pretend_gx_id
 
 
 async def test_manifest_requires_home_assistant_mqtt(hass) -> None:
@@ -181,6 +190,195 @@ async def test_async_setup_entry_completes_when_initial_refresh_fails(
     coordinator.async_refresh.assert_awaited_once()
     mock_forward.assert_awaited_once_with(mock_config_entry, PLATFORMS)
     assert hass.data[DOMAIN][mock_config_entry.entry_id].coordinator is coordinator
+
+
+async def test_async_setup_entry_creates_inactive_virtual_device_from_options_config(
+    hass,
+    entry_data: dict[str, str],
+) -> None:
+    """A persisted Sandbox virtual-battery entry creates its inactive device."""
+    registration_id = "11111111-1111-4111-8111-111111111111"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="HorizonIQ (Sandbox)",
+        data={
+            **entry_data,
+            CONF_ENVIRONMENT: SANDBOX_ENVIRONMENT,
+            CONF_REGISTRATION_ID: registration_id,
+            CONF_REGISTRATION_CONFIG: {
+                "ChargeEfficiency": 0.95,
+                "DischargeEfficiency": 0.9,
+                "EquipmentProfile": {
+                    "BatteryCapacityWh": 10_000,
+                    "MinimumCapacityPercentage": 0.2,
+                    "MaximumBatteryChargePowerWatts": 2_000,
+                    "MaximumBatteryDischargePowerWatts": 2_000,
+                },
+            },
+        },
+        options={CONF_CAPACITY_SOURCE: CAPACITY_SOURCE_VIRTUAL_BATTERY},
+        entry_id="sandbox-options-entry",
+        version=3,
+    )
+    entry.add_to_hass(hass)
+
+    with (
+        patch("custom_components.horizoniq._ensure_local_docs", AsyncMock()),
+        patch(
+            "custom_components.horizoniq.coordinator.HorizonIQCoordinator.async_refresh",
+            AsyncMock(),
+        ),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    assert runtime.is_sandbox_configured
+    assert entry.data[CONF_CAPACITY_SOURCE] == CAPACITY_SOURCE_VIRTUAL_BATTERY
+    assert CONF_CAPACITY_SOURCE not in entry.options
+
+    device = dr.async_get(hass).async_get_device(
+        identifiers={(DOMAIN, pretend_gx_id(registration_id))}
+    )
+    assert device is not None
+    assert device.config_entries == {entry.entry_id}
+
+    entity_registry = er.async_get(hass)
+    enable_entity_id = entity_registry.async_get_entity_id(
+        "switch",
+        DOMAIN,
+        build_unique_id(SANDBOX_ENVIRONMENT, entry.entry_id, "simulation"),
+    )
+    assert enable_entity_id is not None
+    assert hass.states.get(enable_entity_id).state == "off"
+
+    load_entity_id = entity_registry.async_get_entity_id(
+        "number",
+        DOMAIN,
+        build_unique_id(SANDBOX_ENVIRONMENT, entry.entry_id, "load_w"),
+    )
+    assert load_entity_id is not None
+    assert hass.states.get(load_entity_id).state == "unavailable"
+
+    sandbox_entities = [
+        registry_entry
+        for registry_entry in entity_registry.entities.values()
+        if registry_entry.config_entry_id == entry.entry_id
+        and registry_entry.unique_id.startswith(
+            f"{DOMAIN}_{entry.entry_id}_sandbox_"
+        )
+    ]
+    assert sandbox_entities
+    assert {registry_entry.device_id for registry_entry in sandbox_entities} == {
+        device.id
+    }
+
+
+async def test_sandbox_devices_are_entry_scoped_and_persist_across_unload(
+    hass,
+    entry_data: dict[str, str],
+) -> None:
+    """Configured sandbox devices remain one-per-entry across a reload."""
+    first_registration_id = "11111111-1111-4111-8111-111111111111"
+    second_registration_id = "22222222-2222-4222-8222-222222222222"
+
+    def sandbox_data(registration_id: str) -> dict[str, object]:
+        return {
+            **entry_data,
+            CONF_ENVIRONMENT: SANDBOX_ENVIRONMENT,
+            CONF_CAPACITY_SOURCE: CAPACITY_SOURCE_VIRTUAL_BATTERY,
+            CONF_REGISTRATION_ID: registration_id,
+            CONF_REGISTRATION_CONFIG: {
+                "ChargeEfficiency": 0.95,
+                "DischargeEfficiency": 0.9,
+                "EquipmentProfile": {
+                    "BatteryCapacityWh": 10_000,
+                    "MinimumCapacityPercentage": 0.2,
+                    "MaximumBatteryChargePowerWatts": 2_000,
+                    "MaximumBatteryDischargePowerWatts": 2_000,
+                },
+            },
+        }
+
+    first = MockConfigEntry(
+        domain=DOMAIN,
+        data=sandbox_data(first_registration_id),
+        entry_id="sandbox-device-one",
+        version=3,
+    )
+    second = MockConfigEntry(
+        domain=DOMAIN,
+        data=sandbox_data(second_registration_id),
+        entry_id="sandbox-device-two",
+        version=3,
+    )
+    first.add_to_hass(hass)
+    second.add_to_hass(hass)
+
+    coordinator = MagicMock()
+    coordinator.async_refresh = AsyncMock()
+    with (
+        patch("custom_components.horizoniq._ensure_local_docs", AsyncMock()),
+        patch(
+            "custom_components.horizoniq.HorizonIQCoordinator",
+            return_value=coordinator,
+        ),
+        patch.object(
+            hass.config_entries,
+            "async_forward_entry_setups",
+            AsyncMock(return_value=True),
+        ),
+    ):
+        assert await async_setup_entry(hass, first)
+        assert await async_setup_entry(hass, second)
+
+    device_registry = dr.async_get(hass)
+    first_device = device_registry.async_get_device(
+        identifiers={(DOMAIN, pretend_gx_id(first_registration_id))}
+    )
+    second_device = device_registry.async_get_device(
+        identifiers={(DOMAIN, pretend_gx_id(second_registration_id))}
+    )
+    assert first_device is not None
+    assert second_device is not None
+    assert first_device.id != second_device.id
+    assert first_device.config_entries == {first.entry_id}
+    assert second_device.config_entries == {second.entry_id}
+
+    with patch.object(
+        hass.config_entries,
+        "async_unload_platforms",
+        AsyncMock(return_value=True),
+    ):
+        assert await async_unload_entry(hass, first)
+    assert device_registry.async_get(first_device.id) is not None
+
+    with (
+        patch("custom_components.horizoniq._ensure_local_docs", AsyncMock()),
+        patch(
+            "custom_components.horizoniq.HorizonIQCoordinator",
+            return_value=coordinator,
+        ),
+        patch.object(
+            hass.config_entries,
+            "async_forward_entry_setups",
+            AsyncMock(return_value=True),
+        ),
+    ):
+        assert await async_setup_entry(hass, first)
+
+    reloaded_device = device_registry.async_get_device(
+        identifiers={(DOMAIN, pretend_gx_id(first_registration_id))}
+    )
+    assert reloaded_device is not None
+    assert reloaded_device.id == first_device.id
+    assert len(
+        [
+            device
+            for device in device_registry.devices.values()
+            if (DOMAIN, pretend_gx_id(first_registration_id)) in device.identifiers
+        ]
+    ) == 1
 
 
 async def test_async_setup_entry_rejects_duplicate_canonical_registration_id(

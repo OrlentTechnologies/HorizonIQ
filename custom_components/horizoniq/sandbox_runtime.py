@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import re
 from collections.abc import Callable, Iterable, Mapping
@@ -89,6 +90,12 @@ from .simulation.command_lifecycle import (
     parse_issued_command,
     prune_command_ledger,
 )
+from .direct_control import (
+    DirectForecastRejection,
+    parse_replay_command,
+    validate_live_forecast,
+)
+from .models import Forecast
 from .sandbox_storage import (
     MAX_NAMED_SNAPSHOTS,
     SNAPSHOT_SCHEMA_VERSION,
@@ -125,6 +132,8 @@ from .simulation.faults import (
     configure_fault,
     validate_faults,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -315,6 +324,17 @@ class HorizonIQEntryRuntime:
     _task: asyncio.Task[None] | None = None
     _hass: HomeAssistant | None = None
     _coordinator_paused: bool = False
+    _mqtt_emulation_enabled: bool = False
+    _direct_forecast_health: str = "unavailable"
+    _last_direct_command_id: str | None = None
+    _staged_direct_forecast: Forecast | None = None
+    _direct_forecast_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _state_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _live_forecast_now: Callable[[], datetime] = field(
+        default=lambda: datetime.now(timezone.utc)
+    )
+    _direct_replay_payload: Mapping[str, object] | None = None
+    _last_direct_replay_key: str | None = None
     _unloaded: bool = False
     _storage: SandboxStorage | None = None
     _named_snapshots: dict[str, str] = field(default_factory=dict)
@@ -410,6 +430,26 @@ class HorizonIQEntryRuntime:
         return self._state.soc_ratio(self._config.capacity_wh) * 100
 
     @property
+    def can_set_state_of_charge(self) -> bool:
+        """Return whether the live state-of-charge control can act now."""
+        return (
+            self.simulator_enabled
+            and self._playback_state != "running"
+            and (
+                self._replay_session is None
+                or self._replay_session.state
+                not in (_REPLAY_ACTIVE_STATES | {ReplayState.RUNNING, ReplayState.PAUSED})
+            )
+        )
+
+    @property
+    def reserve_percent(self) -> float | None:
+        """Return the current hard reserve in the number control's unit."""
+        if self._config is None:
+            return None
+        return self._config.reserve_wh / self._config.capacity_wh * 100
+
+    @property
     def battery_power_w(self) -> float:
         """Return the most recently simulated AC battery power."""
         return self._last_battery_power_w
@@ -433,16 +473,12 @@ class HorizonIQEntryRuntime:
 
     @property
     def forecast_health(self) -> str:
-        """Return the coordinator or local Node-RED forecast status."""
-        if self._node_red_status is not None:
-            return self._node_red_status.state
-        return "healthy" if self.coordinator.last_update_success else "unhealthy"
+        """Return the direct HA forecast status for this virtual battery."""
+        return self._direct_forecast_health
 
     @property
     def decision_summary(self) -> str:
-        """Return the bounded latest command/Node-RED decision summary."""
-        if self._node_red_status is not None:
-            return self._node_red_status.reason or self._node_red_status.state
+        """Return the bounded latest direct-forecast decision summary."""
         return self.last_command_reason or self.last_command_status.value
 
     @property
@@ -832,7 +868,7 @@ class HorizonIQEntryRuntime:
         return self._replay_session
 
     async def async_start_replay_session(self) -> ReplaySession:
-        """Publish exactly one prepared replay request for this active sandbox."""
+        """Start one direct HA replay without MQTT or Node-RED acknowledgements."""
         async with self._replay_start_lock:
             if (
                 self._replay_session is not None
@@ -843,13 +879,17 @@ class HorizonIQEntryRuntime:
             else:
                 session = await self.async_prepare_replay_session()
             request = self._prepared_replay_request
-            if request is None or self._hass is None or self.pretend_gx_id is None:
-                raise ValueError("MQTT runtime is unavailable")
+            if request is None or self._config is None or self._clock is None:
+                raise ValueError("Sandbox runtime is unavailable")
             self._replay_session = start_replay_request(session)
             try:
-                await self._async_publish_outbound(
-                    replay_request_topic(self.pretend_gx_id),
-                    json.dumps(request.to_payload(), separators=(",", ":")),
+                payload = await self.coordinator.async_fetch_sandbox_replay(
+                    request.to_payload()
+                )
+                direct = parse_replay_command(
+                    payload,
+                    virtual_now_utc=self._clock.state.virtual_time_utc,
+                    config=self._config,
                 )
             except asyncio.CancelledError:
                 raise
@@ -865,7 +905,12 @@ class HorizonIQEntryRuntime:
                 self._notify_listeners()
                 return self._replay_session
             self._prepared_replay_request = None
-            self._schedule_replay_timeout(self._replay_session.replay_id)
+            self._direct_replay_payload = payload
+            self._last_direct_replay_key = direct.replay_key
+            self._command = direct.command
+            self.last_command_status = CommandStatus.APPLIED
+            self.last_command_reason = direct.action
+            self._replay_session = replace(self._replay_session, state=ReplayState.RUNNING)
             await self.async_checkpoint(immediate=True)
             await self._async_publish_runtime_statuses(force=True)
             self._notify_listeners()
@@ -1469,7 +1514,7 @@ class HorizonIQEntryRuntime:
         record = record_mapping(record_value)
         if record is None:
             raise ValueError("Stored fault state is invalid")
-        if record.get("storage_schema_version") not in {5, 6, 7, 8, STORAGE_SCHEMA_VERSION}:
+        if record.get("storage_schema_version") not in {5, 6, 7, 8, 9, STORAGE_SCHEMA_VERSION}:
             return (), {}
         faults = validate_faults(record.get("faults"))
         raw_snapshots = record.get("fault_snapshots")
@@ -1497,9 +1542,9 @@ class HorizonIQEntryRuntime:
         if record is None:
             raise ValueError("Stored state is not an object")
         storage_schema = record.get("storage_schema_version")
-        if storage_schema not in {1, 2, 3, 4, 5, 6, 7, 8, STORAGE_SCHEMA_VERSION}:
+        if storage_schema not in {1, 2, 3, 4, 5, 6, 7, 8, 9, STORAGE_SCHEMA_VERSION}:
             raise ValueError("Unsupported storage schema")
-        if record.get("snapshot_schema_version") not in {1, SNAPSHOT_SCHEMA_VERSION}:
+        if record.get("snapshot_schema_version") not in {1, 2, SNAPSHOT_SCHEMA_VERSION}:
             raise ValueError("Unsupported snapshot schema")
         if record.get("entry_id") != self.entry_id:
             raise ValueError("Stored entry identity does not match")
@@ -1515,7 +1560,7 @@ class HorizonIQEntryRuntime:
         control_config = self._config
         if control_config is None:
             raise ValueError("Sandbox configuration is unavailable")
-        if storage_schema in {8, STORAGE_SCHEMA_VERSION}:
+        if storage_schema in {8, 9, STORAGE_SCHEMA_VERSION}:
             control_config = _control_config_from_storage(
                 record.get("control_config"),
                 fallback=control_config,
@@ -1533,7 +1578,7 @@ class HorizonIQEntryRuntime:
             self._validated_snapshot(from_json(snapshot_json), config=control_config)
             snapshots[normalized] = snapshot_json
         profile_state: tuple[str | None, str | None, str] = (None, None, "stopped")
-        if storage_schema in {2, 3, 4, 5, 6, 7, 8, STORAGE_SCHEMA_VERSION}:
+        if storage_schema in {2, 3, 4, 5, 6, 7, 8, 9, STORAGE_SCHEMA_VERSION}:
             filename = record.get("selected_profile_filename")
             profile_hash = record.get("profile_hash")
             playback_state = record.get("playback_state")
@@ -1557,7 +1602,7 @@ class HorizonIQEntryRuntime:
             False,
             False,
         )
-        if storage_schema in {3, 4, 5, 6, 7, 8, STORAGE_SCHEMA_VERSION}:
+        if storage_schema in {3, 4, 5, 6, 7, 8, 9, STORAGE_SCHEMA_VERSION}:
             session_value = record.get("replay_session")
             starting_energy = record.get("replay_starting_energy_wh")
             import_for_export = record.get("replay_import_for_export_enabled")
@@ -1565,12 +1610,12 @@ class HorizonIQEntryRuntime:
             pending_resume = record.get("replay_pending_resume")
             auto_resume = (
                 record.get("replay_auto_resume_pending")
-                if storage_schema in {4, 5, 6, 7, 8, STORAGE_SCHEMA_VERSION}
+                if storage_schema in {4, 5, 6, 7, 8, 9, STORAGE_SCHEMA_VERSION}
                 else None
             )
             simulate_api_failure = (
                 record.get("replay_simulate_api_failure")
-                if storage_schema in {8, STORAGE_SCHEMA_VERSION}
+                if storage_schema in {8, 9, STORAGE_SCHEMA_VERSION}
                 else False
             )
             if session_value is None:
@@ -1582,7 +1627,7 @@ class HorizonIQEntryRuntime:
                         export_for_solar_headroom,
                     )
                 ) or pending_resume is not False or (
-                    storage_schema in {4, 5, 6, 7, 8, STORAGE_SCHEMA_VERSION} and auto_resume is not False
+                    storage_schema in {4, 5, 6, 7, 8, 9, STORAGE_SCHEMA_VERSION} and auto_resume is not False
                 ) or simulate_api_failure is not False:
                     raise ValueError("Stored replay state is invalid")
             else:
@@ -1601,7 +1646,7 @@ class HorizonIQEntryRuntime:
                     export_for_solar_headroom, bool
                 ) or not isinstance(pending_resume, bool):
                     raise ValueError("Stored replay settings are invalid")
-                if storage_schema in {4, 5, 6, 7, 8, STORAGE_SCHEMA_VERSION} and not isinstance(auto_resume, bool):
+                if storage_schema in {4, 5, 6, 7, 8, 9, STORAGE_SCHEMA_VERSION} and not isinstance(auto_resume, bool):
                     raise ValueError("Stored replay resume state is invalid")
                 if not isinstance(simulate_api_failure, bool):
                     raise ValueError("Stored replay simulated API failure state is invalid")
@@ -1615,7 +1660,7 @@ class HorizonIQEntryRuntime:
                     pending_resume,
                     (
                         auto_resume
-                        if storage_schema in {4, 5, 6, 7, 8, STORAGE_SCHEMA_VERSION}
+                        if storage_schema in {4, 5, 6, 7, 8, 9, STORAGE_SCHEMA_VERSION}
                         else session.state in _REPLAY_ACTIVE_STATES or pending_resume
                     ),
                     simulate_api_failure,
@@ -1626,7 +1671,7 @@ class HorizonIQEntryRuntime:
                 record.get("accepted_command_ids"),
                 snapshot.clock_state.virtual_time_utc,
             )
-            if storage_schema in {6, 7, 8, STORAGE_SCHEMA_VERSION}
+            if storage_schema in {6, 7, 8, 9, STORAGE_SCHEMA_VERSION}
             else ()
         )
         return (
@@ -1762,7 +1807,7 @@ class HorizonIQEntryRuntime:
         return remove_listener
 
     async def async_enable(self, hass: HomeAssistant) -> None:
-        """Start only this sandbox's clock, MQTT handlers, and update loop."""
+        """Start direct HA control and the entry-local virtual clock."""
         if self._unloaded:
             raise RuntimeError("Sandbox runtime has been unloaded")
         if self.simulator_enabled:
@@ -1773,18 +1818,12 @@ class HorizonIQEntryRuntime:
         self.simulator_enabled = True
         self._hass = hass
         try:
-            await self.coordinator.async_pause_for_sandbox()
-            self._coordinator_paused = True
-            await self._async_subscribe_mqtt(hass)
+            self._subscribe_to_coordinator_forecasts()
             for fault in self._faults:
                 if fault.state is FaultState.ACTIVE:
                     self._schedule_fault_expiry(fault)
-                    if fault.kind is FaultKind.MQTT_DISCONNECT:
-                        await self._async_enter_fault_disconnect(fault)
-            await self._async_publish_telemetry_snapshot()
+            await self._async_refresh_direct_forecast()
             self._task = hass.async_create_task(self._async_loop(hass))
-            await self._async_resume_pending_replay()
-            await self._async_publish_runtime_statuses(force=True)
         except Exception:
             await self.async_disable()
             raise
@@ -1864,6 +1903,7 @@ class HorizonIQEntryRuntime:
         if self._replay_session is not None and self._replay_session.state is ReplayState.PAUSED:
             return
         self._clock.step(seconds)
+        await self._async_refresh_direct_forecast()
         await self._async_simulate(seconds, hass=self._hass)
         if self._replay_session is not None and self._replay_session.state in {
             ReplayState.RUNNING,
@@ -1887,8 +1927,9 @@ class HorizonIQEntryRuntime:
         self._last_battery_power_w = 0.0
         self._cumulative_ledger = IntervalLedger()
         self._command = None
-        self.last_command_status = CommandStatus.FALLBACK_MISSING
-        self.last_command_reason = None
+        self.last_command_status = CommandStatus.AWAITING_FORECAST
+        self.last_command_reason = "Awaiting direct forecast."
+        self._direct_forecast_health = "awaiting_forecast"
         self._clock.reset(datetime.now(timezone.utc))
         self._schedule_immediate_checkpoint()
         self._notify_listeners()
@@ -1901,6 +1942,8 @@ class HorizonIQEntryRuntime:
                 "Sandbox reset before command correlation completed.",
             )
         self.reset(energy_wh=energy_wh)
+        if self._staged_forecast_covers_virtual_time():
+            await self._async_stage_direct_forecast(self._staged_direct_forecast)
         await self._async_publish_telemetry_snapshot()
         await self._async_publish_runtime_statuses(force=True)
         await self.async_checkpoint(immediate=True)
@@ -1965,6 +2008,63 @@ class HorizonIQEntryRuntime:
         await self.async_checkpoint(immediate=True)
         self._notify_listeners()
 
+    async def async_set_state_of_charge(self, state_of_charge: float) -> None:
+        """Atomically set this active virtual battery's stored energy in percent.
+
+        This is simulator setup, rather than a modeled grid/solar flow.  The
+        signed ledger term keeps the energy-balance equation explicit while
+        leaving every physical input and the virtual clock unchanged.
+        """
+        if isinstance(state_of_charge, bool) or not math.isfinite(state_of_charge):
+            raise ValueError("State of charge must be a finite percentage")
+        async with self._state_lock:
+            if (
+                self._unloaded
+                or not self.simulator_enabled
+                or self._config is None
+                or self._state is None
+            ):
+                raise ValueError("Sandbox is inactive")
+            if self._playback_state == "running" or (
+                self._replay_session is not None
+                and self._replay_session.state
+                in (_REPLAY_ACTIVE_STATES | {ReplayState.RUNNING, ReplayState.PAUSED})
+            ):
+                raise ValueError("Stop profile playback or replay before setting state of charge")
+            reserve_percent = self._config.reserve_wh / self._config.capacity_wh * 100
+            if not reserve_percent <= state_of_charge <= 100:
+                raise ValueError(
+                    f"State of charge must be between reserve ({reserve_percent:g}%) and 100%"
+                )
+
+            target_energy_wh = self._config.capacity_wh * state_of_charge / 100
+            adjustment_wh = target_energy_wh - self._state.energy_wh
+            self._state = BatteryState(target_energy_wh)
+            ledger_values = {
+                name: getattr(self._cumulative_ledger, name)
+                for name in self._cumulative_ledger.__dataclass_fields__
+            }
+            ledger_values["manual_adjustment_wh"] += adjustment_wh
+            if adjustment_wh >= 0:
+                ledger_values["battery_energy_increase_wh"] += adjustment_wh
+            else:
+                ledger_values["battery_energy_decrease_wh"] -= adjustment_wh
+            self._cumulative_ledger = IntervalLedger(**ledger_values)
+
+            # A command calculated for the former energy level must never
+            # continue.  Keep the cadence-limited forecast request untouched.
+            self._command = Command(OperatingMode.SELF_CONSUMPTION)
+            self._last_direct_command_id = None
+            self.last_command_status = CommandStatus.AWAITING_FORECAST
+            self.last_command_reason = "Awaiting scheduled forecast after manual state-of-charge change."
+            self._direct_forecast_health = "awaiting_forecast"
+            self._clear_pending_command()
+
+            await self._async_publish_telemetry_snapshot()
+            await self._async_publish_runtime_statuses(force=True)
+            await self.async_checkpoint(immediate=True)
+            self._notify_listeners()
+
     async def async_select_scenario(self, scenario: str) -> None:
         """Apply one deterministic built-in scenario without loading a profile."""
         from .simulation.profiles import standard_scenarios
@@ -1998,6 +2098,8 @@ class HorizonIQEntryRuntime:
                 after = self._clock.advance(_LOOP_INTERVAL_SECONDS).virtual_time_utc
                 elapsed_seconds = (after - before).total_seconds()
                 if elapsed_seconds:
+                    if after.minute % 30 == 0 and after.second == 0:
+                        await self._async_refresh_direct_forecast()
                     await self._async_simulate(elapsed_seconds, hass=hass)
         except asyncio.CancelledError:
             raise
@@ -2061,6 +2163,7 @@ class HorizonIQEntryRuntime:
             if current < sample.timestamp_utc or current >= sample_end:
                 raise ValueError("Virtual clock is outside the selected profile")
             segment_end = min(end_time, sample_end)
+            await self._async_apply_direct_replay_action(segment_end)
             await self._async_simulate_segment(
                 (segment_end - current).total_seconds(),
                 segment_end,
@@ -2078,6 +2181,27 @@ class HorizonIQEntryRuntime:
                     await self._async_complete_replay()
                 elif current.minute % 30 == 0 and current.second == 0:
                     await self._async_publish_replay_clock(immediate=True)
+
+    async def _async_apply_direct_replay_action(self, virtual_now_utc: datetime) -> None:
+        """Apply the cached replay horizon only at the owning virtual time."""
+        if self._direct_replay_payload is None or self._config is None:
+            return
+        try:
+            direct = parse_replay_command(
+                self._direct_replay_payload,
+                virtual_now_utc=virtual_now_utc,
+                config=self._config,
+            )
+            if direct.replay_key != self._last_direct_replay_key:
+                self._command = direct.command
+                self._last_direct_replay_key = direct.replay_key
+                self.last_command_status = CommandStatus.APPLIED
+                self.last_command_reason = direct.action
+        except ValueError:
+            self._command = Command(OperatingMode.SELF_CONSUMPTION)
+            self.last_command_status = CommandStatus.FALLBACK_INVALID
+            self.last_command_reason = "Direct replay rejected; self-consumption used."
+            await self._async_fail_replay("Direct replay horizon is invalid.")
 
     async def _async_simulate_segment(
         self,
@@ -2102,15 +2226,137 @@ class HorizonIQEntryRuntime:
         self._state = result.state
         self._last_grid_power_w = result.actual_grid_power_w
         self._last_battery_power_w = result.battery_ac_power_w
-        self.last_command_status = result.command_status
-        self.last_command_reason = result.reason
+        if (
+            self._direct_forecast_health == "healthy"
+            and self._last_direct_command_id is None
+            and self._command is not None
+            and self._command.mode is OperatingMode.SELF_CONSUMPTION
+        ):
+            self.last_command_status = CommandStatus.NO_ACTION
+            self.last_command_reason = "No executable action; self-consumption applied."
+        else:
+            self.last_command_status = result.command_status
+            self.last_command_reason = result.reason
         self.last_health = result.health
         self._cumulative_ledger = self._cumulative_ledger.plus(result.ledger)
         self._schedule_checkpoint()
         self._notify_listeners()
         if hass is not None:
-            await self._async_publish_telemetry_snapshot()
             await self._async_publish_runtime_statuses()
+
+    async def _async_refresh_direct_forecast(self) -> None:
+        """Fetch and apply one validated Forecast_Get action without MQTT authority."""
+        if not self.simulator_enabled or self._config is None or self._clock is None:
+            return
+        try:
+            forecast = await self.coordinator.async_fetch_sandbox_forecast()
+        except Exception as err:
+            self._logger_debug_direct_failure(err)
+            forecast = None
+        await self._async_stage_direct_forecast(forecast)
+
+    def _subscribe_to_coordinator_forecasts(self) -> None:
+        """Stage normal coordinator updates even while virtual time is paused."""
+        subscribe = getattr(self.coordinator, "async_add_listener", None)
+        if not callable(subscribe):
+            return
+        self._unsubscribers.append(subscribe(self._on_coordinator_forecast))
+
+    def _on_coordinator_forecast(self) -> None:
+        """Schedule forecast validation without advancing the simulation clock."""
+        if not self.simulator_enabled or self._hass is None:
+            return
+        snapshot = getattr(self.coordinator, "data", None)
+        forecast = getattr(snapshot, "direct_forecast", None)
+        self._hass.async_create_task(self._async_stage_direct_forecast(forecast))
+
+    async def _async_stage_direct_forecast(self, forecast: Forecast | None) -> None:
+        """Validate and apply a coordinator forecast independently of physics time."""
+        if not self.simulator_enabled or self._config is None or self._clock is None:
+            return
+        async with self._direct_forecast_lock:
+            live_now_utc = self._live_forecast_now()
+            validation = validate_live_forecast(
+                forecast,
+                now_utc=live_now_utc,
+                config=self._config,
+            )
+            if not validation.is_valid:
+                rejection = validation.rejection or DirectForecastRejection.OTHER_INVALID
+                self._command = Command(OperatingMode.SELF_CONSUMPTION)
+                self.last_command_status = CommandStatus.FALLBACK_INVALID
+                self.last_command_reason = f"direct_forecast:{rejection.value}"
+                self._direct_forecast_health = "failed"
+                _LOGGER.debug(
+                    "Rejected direct forecast for entry %s: %s",
+                    self.entry_id,
+                    rejection.value,
+                )
+                await self.async_checkpoint(immediate=True)
+                self._notify_listeners()
+                return
+            try:
+                direct = validation.command
+                assert direct is not None
+                self._staged_direct_forecast = forecast
+                if direct.command_id is None:
+                    self._command = direct.command
+                    self._last_direct_command_id = None
+                    self.last_command_status = CommandStatus.NO_ACTION
+                    self.last_command_reason = (
+                        "No executable action; self-consumption applied."
+                    )
+                    self._direct_forecast_health = "healthy"
+                elif direct.command_id == self._last_direct_command_id:
+                    self._direct_forecast_health = "healthy"
+                elif any(
+                    entry.command_id == direct.command_id
+                    for entry in self._accepted_command_ids
+                ):
+                    if (
+                        self._command is not None
+                        and self._command.expires_at_utc is not None
+                        and live_now_utc < self._command.expires_at_utc
+                    ):
+                        self._last_direct_command_id = direct.command_id
+                        self._direct_forecast_health = "healthy"
+                    else:
+                        raise ValueError("Forecast command is a terminal duplicate")
+                else:
+                    self._accepted_command_ids, accepted = accept_command_id(
+                        self._accepted_command_ids,
+                        direct.command_id,
+                        live_now_utc,
+                    )
+                    if not accepted:
+                        raise ValueError("Forecast command is a retained duplicate")
+                    self._command = direct.command
+                    self._last_direct_command_id = direct.command_id
+                    self.last_command_status = CommandStatus.APPLIED
+                    self.last_command_reason = direct.action
+                    self._direct_forecast_health = "healthy"
+            except Exception as err:
+                self._command = Command(OperatingMode.SELF_CONSUMPTION)
+                self.last_command_status = CommandStatus.FALLBACK_INVALID
+                self.last_command_reason = "Direct forecast rejected; self-consumption used."
+                self._direct_forecast_health = "failed"
+                self._logger_debug_direct_failure(err)
+            await self.async_checkpoint(immediate=True)
+            self._notify_listeners()
+
+    def _staged_forecast_covers_virtual_time(self) -> bool:
+        """Only reapply a cached plan when it is current after a reset."""
+        if self._staged_direct_forecast is None or self._clock is None:
+            return False
+        now_utc = self._live_forecast_now()
+        return any(
+            period.starts_at_utc <= now_utc < period.starts_at_utc + timedelta(minutes=30)
+            for period in self._staged_direct_forecast.periods
+        )
+
+    def _logger_debug_direct_failure(self, err: Exception) -> None:
+        """Keep malformed or failed direct forecast details out of state."""
+        return
 
     def _active_fault(self, kind: FaultKind) -> Fault | None:
         return next((fault for fault in self._faults if fault.kind is kind and fault.state is FaultState.ACTIVE), None)
@@ -2296,7 +2542,7 @@ class HorizonIQEntryRuntime:
     async def _async_publish_outbound(
         self, topic: str, payload: str, *, telemetry: bool = False, retain: bool = False,
     ) -> bool:
-        if self._hass is None or self.pretend_gx_id is None or self._unloaded or self._mqtt_fault_disconnected:
+        if (not self._mqtt_emulation_enabled or self._hass is None or self.pretend_gx_id is None or self._unloaded or self._mqtt_fault_disconnected):
             return False
         gx = self.pretend_gx_id
         if not (topic.startswith(f"victron/N/{gx}/") or topic.startswith(f"horizoniq/sandbox/{gx}/")):
@@ -2900,6 +3146,10 @@ class HorizonIQEntryRuntime:
             return CommandStatusState.RECEIVED
         if self.last_command_status is CommandStatus.APPLIED:
             return CommandStatusState.APPLIED
+        if self.last_command_status is CommandStatus.NO_ACTION:
+            return CommandStatusState.NONE
+        if self.last_command_status is CommandStatus.AWAITING_FORECAST:
+            return CommandStatusState.NONE
         if self.last_command_status is CommandStatus.FALLBACK_EXPIRED:
             return CommandStatusState.EXPIRED
         if self.last_command_status is CommandStatus.FALLBACK_INVALID:

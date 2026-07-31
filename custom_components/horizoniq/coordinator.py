@@ -41,7 +41,7 @@ from .coordinator_helpers import (
     extract_forecast_cadence_minutes_from_registration_data,
     normalize_trial,
 )
-from .models import ForecastData, ForecastPeriod, HorizonIQSnapshot
+from .models import Forecast, ForecastData, ForecastPeriod, HorizonIQSnapshot
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -107,6 +107,51 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
             return
         self._sandbox_paused = False
         await self.async_request_refresh()
+
+    async def async_fetch_sandbox_forecast(self) -> Forecast | None:
+        """Fetch one direct virtual-battery forecast through the coordinator model."""
+        battery_capacity = self._current_battery_capacity()
+        payload = await self._fetch_payload(
+            request_url=self._build_request_url(battery_capacity),
+            battery_capacity=battery_capacity,
+        )
+        snapshot = build_snapshot(payload)
+        self._latest_snapshot = snapshot
+        self._has_successful_forecast = True
+        self._initial_forecast_failures = 0
+        if snapshot.forecast_cadence_minutes is not None:
+            self._set_forecast_cadence_minutes(snapshot.forecast_cadence_minutes)
+        if self._update_cached_state(snapshot):
+            self._persist_state()
+        self.async_set_updated_data(snapshot)
+        return snapshot.direct_forecast
+
+    async def async_fetch_sandbox_replay(
+        self, request: Mapping[str, object]
+    ) -> dict[str, object]:
+        """Call the direct replay endpoint without using MQTT or Node-RED."""
+        parsed = urlparse(self._url)
+        query = {"code": self._forecast_function_key}
+        replay_url = urlunparse(
+            parsed._replace(path="/api/reports/forecast/replay", query=urlencode(query))
+        )
+        try:
+            async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
+                async with self._session.post(
+                    replay_url,
+                    json=dict(request),
+                    headers={**self._build_request_headers(), "Content-Type": "application/json"},
+                ) as response:
+                    if response.status != HTTPStatus.OK:
+                        raise UpdateFailed(f"Replay API returned status {response.status}")
+                    payload = await self._read_json_payload(response)
+        except TimeoutError as err:
+            raise UpdateFailed("Timed out fetching HorizonIQ replay") from err
+        except ClientError as err:
+            raise UpdateFailed(f"Error communicating with HorizonIQ replay API: {err}") from err
+        if not isinstance(payload, dict):
+            raise UpdateFailed("Replay API returned an unexpected payload shape")
+        return payload
 
     def set_battery_capacity_provider(
         self, provider: Callable[[], str] | None

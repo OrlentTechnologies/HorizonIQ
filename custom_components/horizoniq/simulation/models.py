@@ -6,7 +6,7 @@ from enum import Enum
 from typing import Literal
 
 class OperatingMode(str, Enum): IDLE = "idle"; SELF_CONSUMPTION = "self_consumption"; GRID_SETPOINT = "grid_setpoint"
-class CommandStatus(str, Enum): APPLIED = "applied"; FALLBACK_MISSING = "fallback_missing"; FALLBACK_STALE = "fallback_stale"; FALLBACK_EXPIRED = "fallback_expired"; FALLBACK_INVALID = "fallback_invalid"
+class CommandStatus(str, Enum): APPLIED = "applied"; NO_ACTION = "no_action"; AWAITING_FORECAST = "awaiting_forecast"; FALLBACK_MISSING = "fallback_missing"; FALLBACK_STALE = "fallback_stale"; FALLBACK_EXPIRED = "fallback_expired"; FALLBACK_INVALID = "fallback_invalid"
 class SimulationHealth(str, Enum): HEALTHY = "healthy"; UNHEALTHY = "unhealthy"
 ClockRateValue = Literal["paused", "1x", "10x", "60x", "240x"]
 
@@ -23,7 +23,7 @@ class Command:
     mode: OperatingMode; requested_grid_power_w: float | None = None; issued_at_utc: datetime | None = None; expires_at_utc: datetime | None = None
 @dataclass(frozen=True, slots=True)
 class IntervalLedger:
-    grid_import_wh: float = 0.; grid_export_wh: float = 0.; solar_generation_wh: float = 0.; load_consumption_wh: float = 0.; battery_energy_increase_wh: float = 0.; battery_energy_decrease_wh: float = 0.; charge_conversion_loss_wh: float = 0.; discharge_conversion_loss_wh: float = 0.; start_battery_energy_wh: float = 0.; end_battery_energy_wh: float = 0.; balance_error_wh: float = 0.
+    grid_import_wh: float = 0.; grid_export_wh: float = 0.; solar_generation_wh: float = 0.; load_consumption_wh: float = 0.; battery_energy_increase_wh: float = 0.; battery_energy_decrease_wh: float = 0.; charge_conversion_loss_wh: float = 0.; discharge_conversion_loss_wh: float = 0.; manual_adjustment_wh: float = 0.; start_battery_energy_wh: float = 0.; end_battery_energy_wh: float = 0.; balance_error_wh: float = 0.
     def plus(self, other: "IntervalLedger") -> "IntervalLedger": return IntervalLedger(**{name: getattr(self, name) + getattr(other, name) for name in self.__dataclass_fields__})
 @dataclass(frozen=True, slots=True)
 class StepResult:
