@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DEFAULT_ENVIRONMENT, DOMAIN
@@ -14,6 +15,7 @@ from .entity_helpers import (
     entity_name,
     environment_label,
     normalized_environment,
+    virtual_battery_device_info,
 )
 from .sandbox_runtime import HorizonIQEntryRuntime
 
@@ -86,8 +88,14 @@ class _SandboxButton(ButtonEntity):
 
     @property
     def available(self) -> bool:
-        """Operational controls are available only while their sandbox is active."""
-        return self._runtime.simulator_enabled
+        """Keep actions visible while their loaded runtime owns the device."""
+        return self._runtime.virtual_entity_available
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Associate each sandbox action with its entry-owned virtual battery."""
+        assert self._runtime.pretend_gx_id is not None
+        return virtual_battery_device_info(self._runtime.pretend_gx_id)
 
     async def async_will_remove_from_hass(self) -> None:
         """Remove the entry-local runtime callback."""
@@ -128,10 +136,6 @@ class SandboxResetProfileButton(_SandboxButton):
 
     def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str) -> None:
         super().__init__(runtime, entry_id, "profile_reset")
-
-    @property
-    def available(self) -> bool:
-        return super().available and self._runtime.selected_profile_filename is not None
 
     async def async_press(self) -> None:
         await self._runtime.async_reset_playback()

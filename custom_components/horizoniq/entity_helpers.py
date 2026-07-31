@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.util import slugify
 
 from .const import (
@@ -46,3 +47,13 @@ def build_unique_id(environment: str, entry_id: str, suffix: str) -> str:
             unique_id_parts.append(environment_slug)
     unique_id_parts.append(suffix)
     return "_".join(unique_id_parts)
+
+
+def virtual_battery_device_info(gx_device_id: str) -> DeviceInfo:
+    """Return the shared device metadata for one virtual sandbox battery."""
+    return DeviceInfo(
+        identifiers={(DOMAIN, gx_device_id)},
+        name="HorizonIQ Virtual Battery",
+        manufacturer="HorizonIQ",
+        model="Sandbox virtual battery",
+    )

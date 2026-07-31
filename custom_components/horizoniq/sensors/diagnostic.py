@@ -1,8 +1,6 @@
-from __future__ import annotations
+"""Bounded, safe forecast diagnostics."""
 
-from collections.abc import Mapping
-from copy import deepcopy
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from __future__ import annotations
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.helpers.entity import EntityCategory
@@ -14,26 +12,28 @@ from ..entity_helpers import (
     environment_label,
     normalized_environment,
 )
+from ..models import HorizonIQSnapshot
 
-_REDACTED = "REDACTED"
-_SENSITIVE_KEY_PARTS = ("password", "secret", "token", "function_key")
-_SENSITIVE_EXACT_KEYS = {
+_MAX_DIAGNOSTIC_TEXT_LENGTH = 512
+_SENSITIVE_TEXT_MARKERS = (
     "api_key",
     "apikey",
-    "code",
-    "forecastfunctionkey",
-    "forecast_function_key",
+    "code=",
+    "token",
+    "secret",
+    "password",
     "registrationdata",
     "registration_data",
-}
-_URL_KEY_PARTS = ("endpoint", "url")
-_SENSITIVE_QUERY_PARAMETERS = {"code"}
+)
 
 
 class ForecastDetailSensor(HorizonIQEntity, SensorEntity):
-    """Expose normalized forecast detail for diagnostics."""
+    """Expose a compact forecast summary without retaining payload data."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _unrecorded_attributes = frozenset(
+        {"reason", "last_error", "forecast_horizon"}
+    )
 
     def __init__(self, coordinator, entry_id: str, environment: str) -> None:
         super().__init__(coordinator)
@@ -44,117 +44,93 @@ class ForecastDetailSensor(HorizonIQEntity, SensorEntity):
         )
 
     @property
-    def native_value(self) -> int | None:
-        """Return the number of forecast periods in the current snapshot."""
+    def native_value(self) -> int:
+        """Return the number of forecast periods, including an empty default."""
         snapshot = self.snapshot
-        if snapshot is None:
-            return None
-        return len(snapshot.forecast_periods)
+        return len(snapshot.forecast_periods) if snapshot is not None else 0
 
     @property
     def extra_state_attributes(self) -> dict[str, object]:
-        """Return normalized diagnostic attributes."""
+        """Return the small, safe forecast summary shown in Home Assistant."""
+        snapshot = self.snapshot
         attrs: dict[str, object] = {
             "environment": environment_label(self._environment),
+            "health": _health(self.coordinator.last_update_success, snapshot),
+            "period_count": len(snapshot.forecast_periods) if snapshot is not None else 0,
         }
-
-        snapshot = self.snapshot
         if snapshot is None:
+            _add_text_attribute(
+                attrs,
+                "last_error",
+                getattr(self.coordinator, "last_exception", None),
+            )
             return attrs
 
-        periods_payload = [
-            _period_diagnostics_payload(period) for period in snapshot.forecast_periods
-        ]
-        attrs["period_count"] = len(periods_payload)
-
-        forecast = _diagnostics_safe_payload(snapshot.forecast)
-        if forecast:
-            if periods_payload:
-                forecast["periods"] = periods_payload
-            else:
-                forecast_periods = forecast.get("periods")
-                if isinstance(forecast_periods, list):
-                    forecast["periods"] = [
-                        _period_diagnostics_payload(period)
-                        if isinstance(period, Mapping)
-                        else period
-                        for period in forecast_periods
-                    ]
-            attrs["forecast"] = forecast
-        if snapshot.trial:
-            trial = _diagnostics_safe_payload(snapshot.trial)
-            status = trial.get("status")
-            if status is not None:
-                attrs["trial_status"] = status
-            authorization_status = trial.get("authorization_status")
-            if authorization_status is not None:
-                attrs["authorization_status"] = authorization_status
-            authorization_status_code = trial.get("authorization_status_code")
-            if authorization_status_code is not None:
-                attrs["authorization_status_code"] = authorization_status_code
-            attrs["trial"] = trial
-        if snapshot.registration:
-            attrs["registration"] = _diagnostics_safe_payload(snapshot.registration)
-
+        forecast = snapshot.forecast
+        schema5_forecast = snapshot.schema5_forecast
+        _add_text_attribute(attrs, "selected_action", _selected_action(snapshot))
+        for key in ("calculated_on_utc", "created_at_utc", "effective_at_utc"):
+            _add_text_attribute(attrs, key, forecast.get(key))
+        _add_text_attribute(
+            attrs,
+            "reason",
+            forecast.get("authorization_message")
+            or snapshot.trial.get("authorization_message"),
+        )
+        _add_text_attribute(
+            attrs,
+            "last_error",
+            getattr(self.coordinator, "last_exception", None),
+        )
+        if schema5_forecast is not None:
+            attrs["plan_id"] = schema5_forecast.plan_id
+            attrs["plan_kind"] = schema5_forecast.plan_kind
+            attrs["stale"] = schema5_forecast.stale
+            attrs["forecast_horizon"] = schema5_forecast.to_dict()
         return attrs
 
 
-def _period_diagnostics_payload(period: Mapping[str, object]) -> dict[str, object]:
-    """Return the diagnostics-safe period payload without history details."""
-    return {
-        key: _diagnostics_safe_value(key, value)
-        for key, value in period.items()
-        if str(key).lower() != "history"
-    }
+def _selected_action(snapshot: HorizonIQSnapshot) -> str | None:
+    """Return one current action without retaining the forecast period list."""
+    direct_forecast = snapshot.direct_forecast
+    if direct_forecast is not None:
+        for period in direct_forecast.periods:
+            if period.executable_action:
+                return _friendly_enum(period.executable_action)
+
+    for period in snapshot.forecast_periods:
+        action = period.get("executable_action") or period.get("recommended_action")
+        if action:
+            return _friendly_enum(str(action))
+    return None
 
 
-def _diagnostics_safe_payload(payload: Mapping[str, object]) -> dict[str, object]:
-    """Return a diagnostics payload with sensitive trial binding values redacted."""
-    return {
-        key: _diagnostics_safe_value(key, value)
-        for key, value in payload.items()
-    }
+def _health(last_update_success: bool, snapshot: HorizonIQSnapshot | None) -> str:
+    """Return the concise health value for the bounded diagnostics summary."""
+    if snapshot is not None:
+        authorization_status = (
+            snapshot.trial.get("authorization_status")
+            or snapshot.forecast.get("authorization_status")
+        )
+        if authorization_status:
+            return str(authorization_status).replace("_", " ").title()
+    return "Healthy" if last_update_success else "Unavailable"
 
 
-def _diagnostics_safe_value(key: object, value: object) -> object:
-    key_text = str(key)
-    if _is_sensitive_diagnostics_key(key_text):
-        return _REDACTED
-    if isinstance(value, str):
-        return _diagnostics_safe_string(key_text, value)
-    return _diagnostics_safe_object(value)
+def _add_text_attribute(attrs: dict[str, object], key: str, value: object) -> None:
+    """Add one bounded, credential-safe diagnostic value."""
+    if value is None:
+        return
+    text = str(value).strip()
+    if not text:
+        return
+    lowered = text.lower()
+    if any(marker in lowered for marker in _SENSITIVE_TEXT_MARKERS):
+        attrs[key] = "REDACTED"
+        return
+    attrs[key] = text[:_MAX_DIAGNOSTIC_TEXT_LENGTH]
 
 
-def _diagnostics_safe_object(value: object) -> object:
-    if isinstance(value, Mapping):
-        return _diagnostics_safe_payload(value)
-    if isinstance(value, list):
-        return [_diagnostics_safe_object(item) for item in value]
-    return deepcopy(value)
-
-
-def _is_sensitive_diagnostics_key(key: str) -> bool:
-    normalized = key.replace("-", "_").lower()
-    collapsed = normalized.replace("_", "")
-    if normalized in _SENSITIVE_EXACT_KEYS or collapsed in _SENSITIVE_EXACT_KEYS:
-        return True
-    if any(part in normalized for part in _SENSITIVE_KEY_PARTS):
-        return True
-
-    return collapsed.endswith("deviceid")
-
-
-def _diagnostics_safe_string(key: str, value: str) -> str:
-    normalized = key.replace("-", "_").lower()
-    if not any(part in normalized for part in _URL_KEY_PARTS):
-        return value
-
-    parsed = urlparse(value)
-    if not parsed.query:
-        return value
-
-    query = [
-        (name, _REDACTED if name.lower() in _SENSITIVE_QUERY_PARAMETERS else val)
-        for name, val in parse_qsl(parsed.query, keep_blank_values=True)
-    ]
-    return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
+def _friendly_enum(value: str) -> str:
+    """Return a readable label for a machine-readable forecast action."""
+    return value.replace("_", " ").replace("-", " ").title()

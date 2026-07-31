@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from datetime import timedelta
 from http import HTTPStatus
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -41,7 +42,8 @@ from .coordinator_helpers import (
     extract_forecast_cadence_minutes_from_registration_data,
     normalize_trial,
 )
-from .models import ForecastData, ForecastPeriod, HorizonIQSnapshot
+from .forecast_schema5 import Schema5Forecast, Schema5ForecastError
+from .models import Forecast, ForecastData, ForecastPeriod, HorizonIQSnapshot
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -87,8 +89,10 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         self._has_successful_forecast = False
         self._initial_forecast_failures = 0
         self._latest_snapshot = HorizonIQSnapshot()
+        self._last_valid_schema5_forecast: Schema5Forecast | None = None
         self.environment = normalize_environment(environment)
         self._sandbox_paused = False
+        self._sandbox_explicit_refresh = False
         super().__init__(
             hass,
             _LOGGER,
@@ -101,12 +105,69 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         """Suppress only this coordinator's cloud refreshes while simulated."""
         self._sandbox_paused = True
 
+    async def async_request_refresh(self) -> None:
+        """Fetch when a caller explicitly requests a paused sandbox refresh."""
+        if not self._sandbox_paused:
+            await super().async_request_refresh()
+            return
+
+        self._sandbox_explicit_refresh = True
+        try:
+            await super().async_request_refresh()
+        finally:
+            self._sandbox_explicit_refresh = False
+
     async def async_resume_from_sandbox(self) -> None:
         """Resume this coordinator once after sandbox simulation stops."""
         if not self._sandbox_paused:
             return
         self._sandbox_paused = False
         await self.async_request_refresh()
+
+    async def async_fetch_sandbox_forecast(self) -> Forecast | None:
+        """Fetch one direct virtual-battery forecast through the coordinator model."""
+        battery_capacity = self._current_battery_capacity()
+        payload = await self._fetch_payload(
+            request_url=self._build_request_url(battery_capacity),
+            battery_capacity=battery_capacity,
+        )
+        snapshot = self._build_snapshot_or_stale(payload)
+        self._latest_snapshot = snapshot
+        self._has_successful_forecast = True
+        self._initial_forecast_failures = 0
+        if snapshot.forecast_cadence_minutes is not None:
+            self._set_forecast_cadence_minutes(snapshot.forecast_cadence_minutes)
+        if self._update_cached_state(snapshot):
+            self._persist_state()
+        self.async_set_updated_data(snapshot)
+        return snapshot.direct_forecast
+
+    async def async_fetch_sandbox_replay(
+        self, request: Mapping[str, object]
+    ) -> dict[str, object]:
+        """Call the direct replay endpoint without using MQTT or Node-RED."""
+        parsed = urlparse(self._url)
+        query = {"code": self._forecast_function_key}
+        replay_url = urlunparse(
+            parsed._replace(path="/api/reports/forecast/replay", query=urlencode(query))
+        )
+        try:
+            async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
+                async with self._session.post(
+                    replay_url,
+                    json=dict(request),
+                    headers={**self._build_request_headers(), "Content-Type": "application/json"},
+                ) as response:
+                    if response.status != HTTPStatus.OK:
+                        raise UpdateFailed(f"Replay API returned status {response.status}")
+                    payload = await self._read_json_payload(response)
+        except TimeoutError as err:
+            raise UpdateFailed("Timed out fetching HorizonIQ replay") from err
+        except ClientError as err:
+            raise UpdateFailed(f"Error communicating with HorizonIQ replay API: {err}") from err
+        if not isinstance(payload, dict):
+            raise UpdateFailed("Replay API returned an unexpected payload shape")
+        return payload
 
     def set_battery_capacity_provider(
         self, provider: Callable[[], str] | None
@@ -154,9 +215,14 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         """Return the target capacity from the current snapshot."""
         return self._current_snapshot.target_capacity
 
+    @property
+    def schema5_forecast(self) -> Schema5Forecast | None:
+        """Return this entry's complete latest schema-5 diagnostics horizon."""
+        return self._current_snapshot.schema5_forecast
+
     async def _async_update_data(self) -> HorizonIQSnapshot:
         """Fetch the latest HorizonIQ data."""
-        if self._sandbox_paused:
+        if self._sandbox_paused and not self._sandbox_explicit_refresh:
             return self._current_snapshot
         battery_capacity = self._current_battery_capacity()
         request_url = self._build_request_url(battery_capacity)
@@ -180,7 +246,7 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
                 str(err),
                 retry_after=self._next_initial_forecast_retry_seconds(),
             ) from err
-        snapshot = build_snapshot(payload)
+        snapshot = self._build_snapshot_or_stale(payload)
         self._has_successful_forecast = True
         self._initial_forecast_failures = 0
         if snapshot.forecast_cadence_minutes is not None:
@@ -195,6 +261,23 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
             self._entry.entry_id,
             len(snapshot.forecast_periods),
         )
+        return snapshot
+
+    def _build_snapshot_or_stale(
+        self, payload: Mapping[str, object]
+    ) -> HorizonIQSnapshot:
+        """Keep the last complete schema-5 plan when a new contract is rejected."""
+        try:
+            snapshot = build_snapshot(payload)
+        except Schema5ForecastError as err:
+            if self._last_valid_schema5_forecast is None:
+                raise UpdateFailed(f"Malformed schema-5 forecast: {err}") from err
+            return replace(
+                self._latest_snapshot,
+                schema5_forecast=self._last_valid_schema5_forecast.as_stale(),
+            )
+        if snapshot.schema5_forecast is not None:
+            self._last_valid_schema5_forecast = snapshot.schema5_forecast
         return snapshot
 
     def _next_initial_forecast_retry_seconds(self) -> int:

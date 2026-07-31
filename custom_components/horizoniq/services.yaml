@@ -70,6 +70,23 @@ reset:
           min: 0
           max: 2000000
           mode: box
+set_virtual_battery_state_of_charge:
+  name: Set virtual battery state of charge
+  description: Set the stored energy of exactly one active virtual Sandbox as a percentage. The configured reserve remains a hard minimum.
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+    state_of_charge:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
 snapshot_create:
   name: Create sandbox snapshot
   fields:
@@ -88,6 +105,14 @@ snapshot_create:
 snapshot_list:
   name: List sandbox snapshots
   description: Returns the names of snapshots owned by one sandbox entry.
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+get_sandbox_forecast_diagnostics:
+  name: Get sandbox forecast diagnostics
+  description: Returns the complete normalized schema-5 forecast for exactly one virtual Sandbox entry.
   fields:
     entry_id:
       required: true

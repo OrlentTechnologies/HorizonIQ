@@ -276,6 +276,7 @@ def test_status_identity_schema_and_transition_validation_are_strict() -> None:
     with pytest.raises(ValueError):
         validate_remote_status(invalid, owning_gx_device_id=GX_ID, active_replay_id=REPLAY_ID)
     invalid["schemaVersion"] = 4
+    invalid.pop("unexpected")
     invalid["reason"] = "x" * 240
     assert validate_remote_status(
         invalid, owning_gx_device_id=GX_ID, active_replay_id=REPLAY_ID
@@ -283,7 +284,6 @@ def test_status_identity_schema_and_transition_validation_are_strict() -> None:
     invalid["reason"] = "x" * 241
     with pytest.raises(ValueError):
         validate_remote_status(invalid, owning_gx_device_id=GX_ID, active_replay_id=REPLAY_ID)
-    invalid.pop("unexpected")
     invalid["replayId"] = "11111111-1111-4111-8111-111111111112"
     with pytest.raises(ValueError):
         validate_remote_status(invalid, owning_gx_device_id=GX_ID, active_replay_id=REPLAY_ID)

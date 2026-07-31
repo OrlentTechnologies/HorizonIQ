@@ -146,9 +146,9 @@
     <div class="card">
       <h2>Sandbox virtual battery</h2>
       <p>Sandbox entries using <code>Virtual battery</code> expose one isolated device. Enable <code>Simulation</code> first; operational numbers, selectors, buttons, and telemetry are unavailable while it is disabled. Each entry has its own generated GX ID, virtual clock, profile directory, snapshots, faults, and MQTT handlers.</p>
-      <p>Use the device to change synthetic load/solar, battery limits and efficiencies, clock rate, scenario, profile, and fault kind. Use the <code>horizoniq</code> services for profile playback, deterministic stepping, reset, snapshot create/list/restore/delete, and fault lifecycle actions.</p>
+      <p>Use the device to change synthetic load/solar, battery limits and efficiencies, and the active-only <code>Set state of charge</code> slider. It accepts the configured reserve through 100%, updates stored energy immediately, and never advances the virtual clock. Use <code>horizoniq.set_virtual_battery_state_of_charge</code> with one active entry ID for automations; playback and replay must be stopped first.</p>
       <p>Profiles are synthetic JSON or CSV files under <code>&lt;HA config&gt;/horizoniq/profiles/&lt;config_entry_id&gt;/</code>, validated at five-minute resolution and limited to 31 days. Snapshots are local and contain virtual state only; no credentials, production identities, or actual telemetry.</p>
-      <p>Energy-balance health checks: grid import + solar + battery discharge = load + battery charge + grid export + modeled conversion losses. Conversion loss is expected when efficiency is below 100%; a balance error beyond tolerance marks the sandbox unhealthy.</p>
+      <p>Energy-balance health checks: grid import + solar + battery discharge + signed manual adjustment = load + battery charge + grid export + modeled conversion losses. Manual adjustment is local simulator setup, not grid, solar, loss, saving, or actual telemetry. Conversion loss is expected when efficiency is below 100%; a balance error beyond tolerance marks the sandbox unhealthy.</p>
     </div>
 
     <div class="card">

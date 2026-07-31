@@ -1,0 +1,47 @@
+{
+  "schema_version": 5,
+  "plan_id": "a2b2eb79-6a79-469f-ac10-df23a9532685",
+  "plan_kind": "live",
+  "created_at_utc": "2026-07-30T11:59:58Z",
+  "effective_at_utc": "2026-07-30T12:30:00Z",
+  "hash": "forecast-hash-v5-opaque",
+  "registration_data": "encrypted-registration-data-opaque",
+  "forecast_cadence_minutes": 5,
+  "equipment_profile": {
+    "id": "sandbox-virtual-battery-v1",
+    "version": 3,
+    "source": "legacy-derived",
+    "displayName": "Sandbox virtual battery",
+    "batteryCapacityWh": 28800,
+    "minimumCapacityPercentage": 0.2,
+    "maximumBatteryChargePowerWatts": 4000,
+    "maximumBatteryDischargePowerWatts": 4000,
+    "inverterMaximumChargePowerWatts": 3600,
+    "inverterMaximumDischargePowerWatts": 3600,
+    "maximumGridImportPowerWatts": 3000,
+    "maximumGridExportPowerWatts": 3000,
+    "controlAdapterId": "self-consumption-only",
+    "supportedControl": {
+      "requiredCharging": true,
+      "useGrid": false,
+      "importForExport": false,
+      "profitableExport": false,
+      "solarHeadroomExport": false
+    },
+    "productionExportEnabled": false,
+    "safeFallbackId": "self-consumption-only"
+  },
+  "periods": [
+    {
+      "date": "2026-07-30T12:30:00Z",
+      "executable_action": "none",
+      "simulation_action": "none",
+      "recommended_action": "self_consumption",
+      "expected_import": 0.0,
+      "expected_export": 0.0,
+      "expected_start_soc": 16.3,
+      "expected_end_soc": 16.3,
+      "decision_trace": {"reason": "no-executable-action"}
+    }
+  ]
+}

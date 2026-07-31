@@ -7,10 +7,12 @@ from datetime import datetime, timezone
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 from .entity_helpers import build_unique_id
+from .entity_helpers import virtual_battery_device_info
 from .sandbox_runtime import HorizonIQEntryRuntime
 from .simulation.clock import ClockRate
 from .simulation.faults import FaultKind
@@ -48,8 +50,14 @@ class _SandboxSelect(SelectEntity):
 
     @property
     def available(self) -> bool:
-        """Selections only control an active virtual device."""
-        return self._runtime.simulator_enabled
+        """Keep selections visible while their loaded runtime owns the device."""
+        return self._runtime.virtual_entity_available
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Associate each sandbox selection with its entry-owned virtual battery."""
+        assert self._runtime.pretend_gx_id is not None
+        return virtual_battery_device_info(self._runtime.pretend_gx_id)
 
     async def async_will_remove_from_hass(self) -> None:
         self._remove_listener()
@@ -82,22 +90,28 @@ class SandboxProfileSelect(_SandboxSelect):
     """Choose one validated profile stored in this entry's owned directory."""
 
     _attr_name = "Replay profile"
-    _attr_options: list[str] = []
+    _not_selected = "Not selected"
+    _attr_options: list[str] = [_not_selected]
 
     def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str) -> None:
         super().__init__(runtime, entry_id, "profile")
-        self._attr_options = []
+        self._attr_options = [self._not_selected]
 
     @property
     def current_option(self) -> str | None:
-        return self._runtime.selected_profile_filename
+        return self._runtime.selected_profile_filename or self._not_selected
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
-        self._attr_options = list(await self._runtime.async_list_profile_filenames())
+        self._attr_options = [
+            self._not_selected,
+            *await self._runtime.async_list_profile_filenames(),
+        ]
         self.async_write_ha_state()
 
     async def async_select_option(self, option: str) -> None:
+        if option == self._not_selected:
+            return
         await self._runtime.async_select_profile(option)
 
 
@@ -140,18 +154,29 @@ class SandboxEquipmentProfileSelect(_SandboxSelect):
             raise ValueError("Only the registration-owned equipment profile is available")
 
 
+def _friendly_option(value: str) -> str:
+    """Return a readable label for a machine-readable select option."""
+    return value.replace("_", " ").replace("-", " ").title()
+
+
 class SandboxFaultKindSelect(_SandboxSelect):
     """Select the supported local fault to inject with the fault button."""
 
     _attr_name = "Fault injection kind"
-    _attr_options = [kind.value for kind in FaultKind]
+    _attr_options = [_friendly_option(kind.value) for kind in FaultKind]
 
     def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str) -> None:
         super().__init__(runtime, entry_id, "fault_kind")
 
     @property
     def current_option(self) -> str:
-        return self._runtime.selected_fault_kind
+        return _friendly_option(self._runtime.selected_fault_kind)
 
     async def async_select_option(self, option: str) -> None:
-        self._runtime.set_selected_fault_kind(option)
+        selected_kind = next(
+            (kind.value for kind in FaultKind if _friendly_option(kind.value) == option),
+            None,
+        )
+        if selected_kind is None:
+            raise ValueError("Fault injection kind is invalid")
+        self._runtime.set_selected_fault_kind(selected_kind)

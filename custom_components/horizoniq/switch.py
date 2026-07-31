@@ -9,7 +9,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
-from .entity_helpers import build_unique_id
+from .entity_helpers import build_unique_id, virtual_battery_device_info
 from .sandbox_runtime import HorizonIQEntryRuntime
 
 
@@ -45,12 +45,12 @@ class SandboxEnableSwitch(SwitchEntity):
     def device_info(self) -> DeviceInfo:
         """Associate the control with exactly one generated virtual device."""
         assert self._runtime.pretend_gx_id is not None
-        return DeviceInfo(
-            identifiers={(DOMAIN, self._runtime.pretend_gx_id)},
-            name="HorizonIQ Virtual Battery",
-            manufacturer="HorizonIQ",
-            model="Sandbox virtual battery",
-        )
+        return virtual_battery_device_info(self._runtime.pretend_gx_id)
+
+    @property
+    def available(self) -> bool:
+        """The simulation switch remains available for every loaded runtime."""
+        return self._runtime.virtual_entity_available
 
     @property
     def is_on(self) -> bool:
@@ -85,16 +85,11 @@ class SandboxProfilePlaybackSwitch(SwitchEntity):
     @property
     def device_info(self) -> DeviceInfo:
         assert self._runtime.pretend_gx_id is not None
-        return DeviceInfo(
-            identifiers={(DOMAIN, self._runtime.pretend_gx_id)},
-            name="HorizonIQ Virtual Battery",
-            manufacturer="HorizonIQ",
-            model="Sandbox virtual battery",
-        )
+        return virtual_battery_device_info(self._runtime.pretend_gx_id)
 
     @property
     def available(self) -> bool:
-        return self._runtime.simulator_enabled and self._runtime.selected_profile_filename is not None
+        return self._runtime.virtual_entity_available
 
     @property
     def is_on(self) -> bool:
