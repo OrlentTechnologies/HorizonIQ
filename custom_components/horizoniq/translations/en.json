@@ -114,6 +114,7 @@
     "snapshot_list": {"name": "List sandbox snapshots", "description": "Return snapshot names for one sandbox."},
     "snapshot_restore": {"name": "Restore sandbox snapshot", "description": "Restore one entry-local snapshot."},
     "snapshot_delete": {"name": "Delete sandbox snapshot", "description": "Delete one entry-local snapshot."},
+    "get_sandbox_forecast_diagnostics": {"name": "Get sandbox forecast diagnostics", "description": "Return the complete accepted schema-5 forecast for one sandbox entry."},
     "fault_configure": {"name": "Configure sandbox fault", "description": "Configure a bounded local fault."},
     "fault_activate": {"name": "Activate sandbox fault", "description": "Activate one configured local fault."},
     "fault_clear": {"name": "Clear sandbox fault", "description": "Clear one local fault."},

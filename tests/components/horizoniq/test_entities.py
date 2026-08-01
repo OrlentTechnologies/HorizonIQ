@@ -294,9 +294,7 @@ def test_forecast_detail_sensor_is_bounded_at_maximum_horizon() -> None:
     assert attrs["period_count"] == 1_488
     assert attrs["selected_action"] == "Self Consumption"
     assert len(json.dumps(attrs)) < 8_192
-    assert entity._unrecorded_attributes == frozenset(
-        {"reason", "last_error", "forecast_horizon"}
-    )
+    assert entity._unrecorded_attributes == frozenset({"forecast"})
 
 
 def test_trial_status_sensor_exposes_trial_state() -> None:

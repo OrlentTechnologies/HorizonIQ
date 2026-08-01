@@ -12,6 +12,7 @@ from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 
 from .const import DOMAIN
+from .forecast_schema5 import Schema5Forecast
 from .sandbox_runtime import MAX_BATTERY_ENERGY_WH, HorizonIQEntryRuntime
 
 
@@ -114,8 +115,11 @@ async def _async_get_sandbox_forecast_diagnostics(
     hass: HomeAssistant, call: ServiceCall
 ) -> dict[str, object]:
     """Return the complete normalized horizon for exactly one sandbox entry."""
-    forecast = _diagnostics_runtime(hass, call.data["entry_id"]).forecast_diagnostics
-    if forecast is None:
+    runtime = _diagnostics_runtime(hass, call.data["entry_id"])
+    forecast = getattr(runtime, "last_forecast", None)
+    if not isinstance(forecast, Schema5Forecast):
+        forecast = getattr(runtime, "forecast_diagnostics", None)
+    if not isinstance(forecast, Schema5Forecast):
         raise HomeAssistantError("No complete schema-5 forecast is available")
     return forecast.to_dict()
 

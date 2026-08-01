@@ -31,19 +31,38 @@ REASON_CODES = frozenset(
 _PROHIBITED_DIAGNOSTIC_KEYS = frozenset(
     {
         "apikey",
+        "apikeys",
         "api_key",
         "authorization",
+        "authorizationheaders",
         "credential",
         "credentials",
+        "credentialdata",
         "functionkey",
         "function_key",
+        "functionkeys",
+        "function_keys",
         "headers",
+        "httpheaders",
+        "http_headers",
+        "requestheaders",
+        "responseheaders",
+        "keys",
+        "key",
         "password",
+        "privatekey",
+        "privatekeys",
+        "publickey",
+        "publickeys",
         "registrationdata",
         "registration_data",
         "secret",
         "token",
     }
+)
+_NORMALIZED_PROHIBITED_DIAGNOSTIC_KEYS = frozenset(
+    key.replace("_", "").replace("-", "")
+    for key in _PROHIBITED_DIAGNOSTIC_KEYS
 )
 
 
@@ -101,7 +120,7 @@ class Schema5Period:
     command_id: str | None
     issued_at_utc: str | None
     expires_at_utc: str | None
-    action_priority: int
+    action_priority: int | None
     expected_import: float
     expected_export: float
     expected_start_soc: float
@@ -210,12 +229,13 @@ class Schema5Forecast:
             "chargingCost": self.charging_cost,
             "saving": self.saving,
             "periods": [period.to_dict() for period in self.periods],
-            "stale": self.stale,
         }
 
 
 def parse_schema5_forecast(payload: Mapping[str, object]) -> Schema5Forecast | None:
     """Parse a complete schema-5 forecast or reject it before any state changes."""
+    if not isinstance(payload, Mapping):
+        raise Schema5ForecastError("forecast payload must be an object")
     source = _forecast_source(payload)
     if "schemaVersion" not in source:
         return None
@@ -223,8 +243,8 @@ def parse_schema5_forecast(payload: Mapping[str, object]) -> Schema5Forecast | N
         raise Schema5ForecastError("Unsupported forecast schemaVersion")
 
     periods_value = source.get("periods")
-    if not isinstance(periods_value, list) or not periods_value:
-        raise Schema5ForecastError("periods must be a non-empty list")
+    if not isinstance(periods_value, list):
+        raise Schema5ForecastError("periods must be a list")
     periods = tuple(_period(item) for item in periods_value)
     return Schema5Forecast(
         schema_version=SCHEMA_VERSION,
@@ -256,6 +276,30 @@ def parse_schema5_forecast(payload: Mapping[str, object]) -> Schema5Forecast | N
 
 
 def _forecast_source(payload: Mapping[str, object]) -> Mapping[str, object]:
+    """Return the schema-5 object without losing a valid top-level contract.
+
+    Some deployed responses include a legacy ``Forecast`` companion beside
+    the normalized schema-5 fields.  Prefer whichever candidate actually
+    advertises ``schemaVersion`` so a legacy wrapper cannot hide the accepted
+    contract.  The wrapper fallback keeps the parser compatible with the
+    ``Forecast``/``forecast``/``forecastEntity`` response shapes.
+    """
+    if "schemaVersion" in payload and "periods" in payload:
+        return payload
+    for key in ("Forecast", "forecast", "forecastEntity"):
+        candidate = payload.get(key)
+        if (
+            isinstance(candidate, Mapping)
+            and "schemaVersion" in candidate
+            and "periods" in candidate
+        ):
+            return candidate
+    if "schemaVersion" in payload:
+        return payload
+    for key in ("Forecast", "forecast", "forecastEntity"):
+        candidate = payload.get(key)
+        if isinstance(candidate, Mapping) and "schemaVersion" in candidate:
+            return candidate
     for key in ("Forecast", "forecast", "forecastEntity"):
         candidate = payload.get(key)
         if isinstance(candidate, Mapping):
@@ -275,10 +319,10 @@ def _period(value: object) -> Schema5Period:
         recommended_action=_text(value, "recommendedAction"),
         simulation_action=_text(value, "simulationAction"),
         executable_action=_text(value, "executableAction"),
-        command_id=_optional_text(value, "commandId"),
-        issued_at_utc=_optional_timestamp(value, "issuedAtUtc"),
-        expires_at_utc=_optional_timestamp(value, "expiresAtUtc"),
-        action_priority=_integer(value, "actionPriority"),
+        command_id=_required_optional_text(value, "commandId"),
+        issued_at_utc=_required_optional_timestamp(value, "issuedAtUtc"),
+        expires_at_utc=_required_optional_timestamp(value, "expiresAtUtc"),
+        action_priority=_required_optional_integer(value, "actionPriority"),
         expected_import=_number(value, "expectedImport"),
         expected_export=_number(value, "expectedExport"),
         expected_start_soc=_number(value, "expectedStartSoc"),
@@ -328,7 +372,10 @@ def _text(source: Mapping[str, object], key: str) -> str:
     return value
 
 
-def _optional_text(source: Mapping[str, object], key: str) -> str | None:
+def _required_optional_text(source: Mapping[str, object], key: str) -> str | None:
+    """Read a contract field that must exist but may explicitly be null."""
+    if key not in source:
+        raise Schema5ForecastError(f"{key} must be present")
     if source.get(key) is None:
         return None
     return _text(source, key)
@@ -345,7 +392,12 @@ def _timestamp(source: Mapping[str, object], key: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _optional_timestamp(source: Mapping[str, object], key: str) -> str | None:
+def _required_optional_timestamp(
+    source: Mapping[str, object], key: str
+) -> str | None:
+    """Read a nullable timestamp whose property is mandatory in schema 5."""
+    if key not in source:
+        raise Schema5ForecastError(f"{key} must be present")
     if source.get(key) is None:
         return None
     return _timestamp(source, key)
@@ -355,7 +407,10 @@ def _number(source: Mapping[str, object], key: str) -> float:
     value = source.get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise Schema5ForecastError(f"{key} must be numeric")
-    result = float(value)
+    try:
+        result = float(value)
+    except OverflowError as err:
+        raise Schema5ForecastError(f"{key} must be finite") from err
     if not math.isfinite(result):
         raise Schema5ForecastError(f"{key} must be finite")
     return result
@@ -366,6 +421,15 @@ def _integer(source: Mapping[str, object], key: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise Schema5ForecastError(f"{key} must be an integer")
     return value
+
+
+def _required_optional_integer(source: Mapping[str, object], key: str) -> int | None:
+    """Read a mandatory nullable integer contract field."""
+    if key not in source:
+        raise Schema5ForecastError(f"{key} must be present")
+    if source.get(key) is None:
+        return None
+    return _integer(source, key)
 
 
 def _positive_integer(source: Mapping[str, object], key: str) -> int:
@@ -401,7 +465,8 @@ def _safe_json_value(value: object) -> bool:
     if isinstance(value, Mapping):
         return all(
             isinstance(key, str)
-            and key.lower() not in _PROHIBITED_DIAGNOSTIC_KEYS
+            and key.lower().replace("_", "").replace("-", "")
+            not in _NORMALIZED_PROHIBITED_DIAGNOSTIC_KEYS
             and _safe_json_value(item)
             for key, item in value.items()
         )
@@ -414,7 +479,12 @@ def _json_value(value: object) -> bool:
     if value is None or isinstance(value, (str, bool)):
         return True
     if isinstance(value, (int, float)):
-        return not isinstance(value, bool) and math.isfinite(float(value))
+        if isinstance(value, bool):
+            return False
+        try:
+            return math.isfinite(float(value))
+        except OverflowError:
+            return False
     if isinstance(value, Mapping):
         return all(isinstance(key, str) and _json_value(item) for key, item in value.items())
     if isinstance(value, list):

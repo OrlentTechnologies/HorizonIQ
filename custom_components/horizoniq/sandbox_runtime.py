@@ -487,8 +487,18 @@ class HorizonIQEntryRuntime:
     @property
     def forecast_diagnostics(self) -> Schema5Forecast | None:
         """Return the latest complete entry-local schema-5 forecast horizon."""
-        forecast = getattr(self.coordinator, "schema5_forecast", None)
+        forecast = getattr(self.coordinator, "last_forecast", None)
+        if not isinstance(forecast, Schema5Forecast):
+            forecast = getattr(self.coordinator, "schema5_forecast", None)
+        if not isinstance(forecast, Schema5Forecast):
+            snapshot = getattr(self.coordinator, "data", None)
+            forecast = getattr(snapshot, "schema5_forecast", None)
         return forecast if isinstance(forecast, Schema5Forecast) else None
+
+    @property
+    def last_forecast(self) -> Schema5Forecast | None:
+        """Return the accepted forecast shared by execution and diagnostics."""
+        return self.forecast_diagnostics
 
     @property
     def decision_summary(self) -> str:
@@ -2284,8 +2294,10 @@ class HorizonIQEntryRuntime:
             forecast = await self.coordinator.async_fetch_sandbox_forecast()
         except Exception as err:
             self._logger_debug_direct_failure(err)
-            forecast = None
-        await self._async_stage_direct_forecast(forecast)
+            forecast = getattr(self.coordinator, "last_direct_forecast", None)
+        await self._async_stage_direct_forecast(
+            forecast if isinstance(forecast, Forecast) else None
+        )
 
     def _subscribe_to_coordinator_forecasts(self) -> None:
         """Stage normal coordinator updates even while virtual time is paused."""
@@ -2300,7 +2312,11 @@ class HorizonIQEntryRuntime:
             return
         snapshot = getattr(self.coordinator, "data", None)
         forecast = getattr(snapshot, "direct_forecast", None)
-        self._hass.async_create_task(self._async_stage_direct_forecast(forecast))
+        self._hass.async_create_task(
+            self._async_stage_direct_forecast(
+                forecast if isinstance(forecast, Forecast) else None
+            )
+        )
 
     async def _async_stage_direct_forecast(self, forecast: Forecast | None) -> None:
         """Validate and apply a coordinator forecast independently of physics time."""

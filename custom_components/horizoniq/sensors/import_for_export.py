@@ -57,7 +57,7 @@ class ImportForExportDecisionSensor(SensorEntity):
     @property
     def native_value(self) -> str:
         """Return the backend-derived import-for-export decision state."""
-        forecast = self._runtime.forecast_diagnostics
+        forecast = _runtime_forecast(self._runtime)
         if forecast is None:
             return "not_planned"
         enabled = (
@@ -72,7 +72,7 @@ class ImportForExportDecisionSensor(SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, object]:
         """Expose only exact backend economics and rejection evidence."""
-        forecast = self._runtime.forecast_diagnostics
+        forecast = _runtime_forecast(self._runtime)
         if forecast is None:
             return {}
         selected = _selected_periods(forecast)
@@ -141,6 +141,15 @@ def _selected_periods(forecast: Schema5Forecast) -> tuple[Schema5Period, ...]:
         for period in forecast.periods
         if _selects_import_for_export(period, forecast.plan_kind)
     )
+
+
+def _runtime_forecast(runtime: HorizonIQEntryRuntime) -> Schema5Forecast | None:
+    """Read the shared last forecast while supporting lightweight test doubles."""
+    forecast = getattr(runtime, "last_forecast", None)
+    if isinstance(forecast, Schema5Forecast):
+        return forecast
+    forecast = getattr(runtime, "forecast_diagnostics", None)
+    return forecast if isinstance(forecast, Schema5Forecast) else None
 
 
 def _selects_import_for_export(period: Schema5Period, plan_kind: str) -> bool:

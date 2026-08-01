@@ -731,6 +731,28 @@ def build_snapshot(payload: Mapping[str, object] | None) -> HorizonIQSnapshot:
 
 
 def _extract_forecast_source(payload: Mapping[str, object]) -> Mapping[str, object]:
+    """Select the same forecast object used by schema-5 diagnostics parsing."""
+    if (
+        ("schemaVersion" in payload or "schema_version" in payload)
+        and ("periods" in payload or "Periods" in payload)
+    ):
+        return payload
+    for key in ("Forecast", "forecast", "forecastEntity"):
+        candidate = payload.get(key)
+        if (
+            isinstance(candidate, Mapping)
+            and ("schemaVersion" in candidate or "schema_version" in candidate)
+            and ("periods" in candidate or "Periods" in candidate)
+        ):
+            return candidate
+    if "schemaVersion" in payload or "schema_version" in payload:
+        return payload
+    for key in ("Forecast", "forecast", "forecastEntity"):
+        candidate = payload.get(key)
+        if isinstance(candidate, Mapping) and (
+            "schemaVersion" in candidate or "schema_version" in candidate
+        ):
+            return candidate
     for key in ("Forecast", "forecast", "forecastEntity"):
         candidate = payload.get(key)
         if isinstance(candidate, Mapping):

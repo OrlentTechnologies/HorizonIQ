@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import sqlite3
 
 import pytest
 from homeassistant.const import EVENT_STATE_CHANGED
@@ -28,6 +30,25 @@ FIXTURE = Path(__file__).with_name("fixtures") / "direct_schema5_forecast.json"
 
 def _payload() -> dict[str, object]:
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
+
+
+def _maximum_horizon_payload() -> dict[str, object]:
+    """Expand the complete fixture to the production 48-period horizon."""
+    payload = _payload()
+    source_periods = payload["periods"]
+    assert isinstance(source_periods, list) and source_periods
+    start = datetime(2026, 7, 30, 12, tzinfo=timezone.utc)
+    periods: list[dict[str, object]] = []
+    for index in range(48):
+        period = deepcopy(source_periods[index % len(source_periods)])
+        assert isinstance(period, dict)
+        period["period"] = index
+        period["date"] = (start + timedelta(minutes=30 * index)).isoformat().replace(
+            "+00:00", "Z"
+        )
+        periods.append(period)
+    payload["periods"] = periods
+    return payload
 
 
 def test_complete_schema5_contract_survives_strict_normalization() -> None:
@@ -112,6 +133,28 @@ def test_schema5_contract_rejects_transport_secrets_in_diagnostics_objects() -> 
 
     with pytest.raises(Schema5ForecastError, match="safe JSON object"):
         parse_schema5_forecast(payload)
+
+
+def test_schema5_contract_omits_top_level_transport_metadata() -> None:
+    """Transport metadata beside the Solar plan never enters live diagnostics."""
+    payload = _payload()
+    payload.update(
+        {
+            "registrationData": "encrypted-registration-data",
+            "credentials": {"apiKey": "secret"},
+            "functionKeys": ["secret-function-key"],
+            "headers": {"X-API-KEY": "secret"},
+        }
+    )
+
+    forecast = parse_schema5_forecast(payload)
+    assert forecast is not None
+    serialized = json.dumps(forecast.to_dict())
+    assert "registrationData" not in serialized
+    assert "credentials" not in serialized
+    assert "functionKeys" not in serialized
+    assert "headers" not in serialized
+    assert "secret" not in serialized
 
 
 def test_malformed_schema5_refresh_keeps_the_last_complete_plan_as_stale() -> None:
@@ -258,6 +301,32 @@ def test_import_for_export_uses_the_action_authoritative_for_each_plan_kind(
     )
 
 
+def test_zero_period_schema5_forecast_is_unavailable_and_kept_complete() -> None:
+    """An accepted zero-period response is never reported as healthy."""
+    payload = _payload()
+    payload["periods"] = []
+    forecast = parse_schema5_forecast(payload)
+    assert forecast is not None
+
+    entity = ForecastDetailSensor(_Coordinator(forecast), "entry-1", "Sandbox")
+    assert entity.native_value == 0
+    assert entity.extra_state_attributes["health"] == "Unavailable"
+    assert entity.extra_state_attributes["forecast"]["periods"] == []
+
+
+def test_stale_last_good_forecast_remains_visible_after_refresh_failure() -> None:
+    """Refresh failure marks the horizon stale without hiding its live data."""
+    forecast = parse_schema5_forecast(_payload())
+    assert forecast is not None
+    coordinator = _Coordinator(forecast.as_stale())
+    coordinator.last_update_success = False
+    entity = ForecastDetailSensor(coordinator, "entry-1", "Live")
+
+    assert entity.available is True
+    assert entity.extra_state_attributes["stale"] is True
+    assert len(entity.extra_state_attributes["forecast"]["periods"]) == 2
+
+
 def test_full_horizon_is_explicitly_unrecorded() -> None:
     """Recorder serialization keeps only the bounded diagnostics summary."""
     forecast = parse_schema5_forecast(_payload())
@@ -272,17 +341,17 @@ def test_full_horizon_is_explicitly_unrecorded() -> None:
         if key not in entity._unrecorded_attributes
     }
 
-    assert "forecast_horizon" in ForecastDetailSensor._unrecorded_attributes
-    assert attributes["forecast_horizon"] == forecast.to_dict()
+    assert ForecastDetailSensor._unrecorded_attributes == frozenset({"forecast"})
+    assert attributes["forecast"] == forecast.to_dict()
     assert "plannedEnergyLedger" not in json.dumps(recorder_attributes)
     assert len(json.dumps(recorder_attributes)) < 8_192
 
 
-def test_recorder_serializes_only_bounded_forecast_diagnostics() -> None:
+def test_recorder_serializes_only_bounded_forecast_diagnostics(caplog) -> None:
     """The production Recorder serializer excludes the complete live horizon."""
     from homeassistant.components.recorder.db_schema import StateAttributes
 
-    forecast = parse_schema5_forecast(_payload())
+    forecast = parse_schema5_forecast(_maximum_horizon_payload())
     assert forecast is not None
     entity = ForecastDetailSensor(_Coordinator(forecast), "entry-1", "Sandbox")
     attributes = entity.extra_state_attributes
@@ -302,10 +371,74 @@ def test_recorder_serializes_only_bounded_forecast_diagnostics() -> None:
     )
     serialized = StateAttributes.shared_attrs_bytes_from_event(event, dialect=None)
 
-    assert b"forecast_horizon" not in serialized
+    assert len(attributes["forecast"]["periods"]) == 48
+    assert attributes["forecast"]["periods"][0]["decisionTrace"]
+    assert b'"forecast"' not in serialized
     assert b"plannedEnergyLedger" not in serialized
     assert b"decisionTrace" not in serialized
     assert len(serialized) < 8_192
+    assert "exceed maximum size" not in caplog.text
+
+
+@pytest.mark.skipif(
+    sqlite3.sqlite_version_info < (3, 40, 1),
+    reason="Home Assistant Recorder requires SQLite 3.40.1 or newer",
+)
+class TestRecorderForecastAttributes:
+    """Recorder coverage requiring its database before Home Assistant starts."""
+
+    @pytest.fixture
+    def auto_enable_custom_integrations(self) -> None:
+        """Avoid starting Home Assistant before the Recorder database is ready."""
+
+    async def test_recorder_database_omits_only_the_full_forecast(
+        self, recorder_mock, hass, caplog
+    ) -> None:
+        """A real Recorder write keeps the complete horizon out of persistence."""
+        from homeassistant.components.recorder.db_schema import (
+            StateAttributes,
+            States,
+            StatesMeta,
+        )
+
+        forecast = parse_schema5_forecast(_maximum_horizon_payload())
+        assert forecast is not None
+        entity = ForecastDetailSensor(_Coordinator(forecast), "entry-1", "Sandbox")
+        attributes = entity.extra_state_attributes
+        entity_id = "sensor.horizoniq_sandbox_forecast_diagnostics_recorder"
+
+        hass.states.async_set(
+            entity_id,
+            "48",
+            attributes,
+            state_info={"unrecorded_attributes": entity._unrecorded_attributes},
+        )
+        await hass.async_block_till_done()
+        await recorder_mock.async_block_till_done()
+
+        live_state = hass.states.get(entity_id)
+        assert live_state is not None
+        assert len(live_state.attributes["forecast"]["periods"]) == 48
+        with recorder_mock.get_session() as session:
+            recorded_state = (
+                session.query(States)
+                .join(StatesMeta, States.metadata_id == StatesMeta.metadata_id)
+                .filter(StatesMeta.entity_id == entity_id)
+                .order_by(States.state_id.desc())
+                .first()
+            )
+            assert recorded_state is not None
+            assert recorded_state.attributes_id is not None
+            recorded_attributes = session.get(
+                StateAttributes, recorded_state.attributes_id
+            )
+            assert recorded_attributes is not None
+            assert "forecast" not in (recorded_attributes.shared_attrs or "")
+            assert "decisionTrace" not in (recorded_attributes.shared_attrs or "")
+            assert len(recorded_attributes.shared_attrs or "") < 8_192
+        assert not any(
+            "exceed maximum size" in record.message for record in caplog.records
+        )
 
 
 class _Runtime:

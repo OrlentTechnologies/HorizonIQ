@@ -127,10 +127,14 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
     async def async_fetch_sandbox_forecast(self) -> Forecast | None:
         """Fetch one direct virtual-battery forecast through the coordinator model."""
         battery_capacity = self._current_battery_capacity()
-        payload = await self._fetch_payload(
-            request_url=self._build_request_url(battery_capacity),
-            battery_capacity=battery_capacity,
-        )
+        try:
+            payload = await self._fetch_payload(
+                request_url=self._build_request_url(battery_capacity),
+                battery_capacity=battery_capacity,
+            )
+        except UpdateFailed:
+            self._publish_stale_forecast()
+            raise
         snapshot = self._build_snapshot_or_stale(payload)
         self._latest_snapshot = snapshot
         self._has_successful_forecast = True
@@ -218,7 +222,20 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
     @property
     def schema5_forecast(self) -> Schema5Forecast | None:
         """Return this entry's complete latest schema-5 diagnostics horizon."""
-        return self._current_snapshot.schema5_forecast
+        return self.last_forecast
+
+    @property
+    def last_direct_forecast(self) -> Forecast | None:
+        """Return the accepted typed direct forecast for this entry."""
+        return self._current_snapshot.direct_forecast
+
+    @property
+    def last_forecast(self) -> Schema5Forecast | None:
+        """Return the accepted schema-5 forecast owned by this entry."""
+        return (
+            self._current_snapshot.schema5_forecast
+            or self._last_valid_schema5_forecast
+        )
 
     async def _async_update_data(self) -> HorizonIQSnapshot:
         """Fetch the latest HorizonIQ data."""
@@ -238,6 +255,7 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
                 battery_capacity=battery_capacity,
             )
         except UpdateFailed as err:
+            self._publish_stale_forecast()
             if str(err) == EXACT_SUBSCRIPTION_FAILURE_BODY:
                 raise
             if self._has_successful_forecast:
@@ -273,12 +291,28 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
             if self._last_valid_schema5_forecast is None:
                 raise UpdateFailed(f"Malformed schema-5 forecast: {err}") from err
             return replace(
-                self._latest_snapshot,
+                self._current_snapshot,
                 schema5_forecast=self._last_valid_schema5_forecast.as_stale(),
             )
         if snapshot.schema5_forecast is not None:
             self._last_valid_schema5_forecast = snapshot.schema5_forecast
+        elif self._last_valid_schema5_forecast is not None:
+            snapshot = replace(
+                snapshot,
+                schema5_forecast=self._last_valid_schema5_forecast.as_stale(),
+            )
         return snapshot
+
+    def _publish_stale_forecast(self) -> None:
+        """Keep the last accepted horizon visible after any later fetch failure."""
+        if self._last_valid_schema5_forecast is None:
+            return
+        stale_snapshot = replace(
+            self._current_snapshot,
+            schema5_forecast=self._last_valid_schema5_forecast.as_stale(),
+        )
+        self._latest_snapshot = stale_snapshot
+        self.async_set_updated_data(stale_snapshot)
 
     def _next_initial_forecast_retry_seconds(self) -> int:
         """Return the next retry delay before the first successful forecast."""
@@ -295,8 +329,9 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
     @property
     def _current_snapshot(self) -> HorizonIQSnapshot:
         """Return the freshest available snapshot."""
-        if self.data is not None:
-            return self.data
+        data = getattr(self, "data", None)
+        if data is not None:
+            return data
         return self._latest_snapshot
 
     async def async_clear_registration_data(self) -> None:
