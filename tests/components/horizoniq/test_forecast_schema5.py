@@ -51,6 +51,26 @@ def _maximum_horizon_payload() -> dict[str, object]:
     return payload
 
 
+def _wire_alias(value: object, style: str) -> object:
+    """Build a complete Solar DTO fixture in one documented wire spelling."""
+    if isinstance(value, list):
+        return [_wire_alias(item, style) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result: dict[str, object] = {}
+    for key, item in value.items():
+        alias = (
+            key[:1].upper() + key[1:]
+            if style == "pascal"
+            else "".join(
+                f"_{character.lower()}" if character.isupper() else character
+                for character in key
+            )
+        )
+        result[alias] = _wire_alias(item, style)
+    return result
+
+
 def test_complete_schema5_contract_survives_strict_normalization() -> None:
     """Every documented plan, period, trace, economics, and ledger field survives."""
     payload = _payload()
@@ -117,6 +137,25 @@ def test_complete_schema5_contract_survives_strict_normalization() -> None:
     assert period["decisionTrace"] == source_period["decisionTrace"]
 
 
+@pytest.mark.parametrize("style", ("pascal", "snake"))
+def test_complete_solar_dto_alias_fixtures_normalize_once(style: str) -> None:
+    """PascalCase and legacy snake_case wire forms reach the same contract."""
+    camel = parse_schema5_forecast(_payload())
+    alias = parse_schema5_forecast(_wire_alias(_payload(), style))
+
+    assert camel is not None and alias is not None
+    assert alias.to_dict() == camel.to_dict()
+
+
+def test_conflicting_schema5_wire_aliases_are_rejected_atomically() -> None:
+    """A response cannot select an arbitrary casing when aliases disagree."""
+    payload = _payload()
+    payload["SchemaVersion"] = 4
+
+    with pytest.raises(Schema5ForecastError, match="Conflicting aliases"):
+        parse_schema5_forecast(payload)
+
+
 def test_schema5_contract_rejects_incomplete_period_atomically() -> None:
     """A missing required field never produces a partial normalized horizon."""
     payload = _payload()
@@ -131,7 +170,7 @@ def test_schema5_contract_rejects_transport_secrets_in_diagnostics_objects() -> 
     payload = _payload()
     payload["economicsAssumptions"]["registrationData"] = "not-for-ha"
 
-    with pytest.raises(Schema5ForecastError, match="safe JSON object"):
+    with pytest.raises(Schema5ForecastError, match="prohibited key"):
         parse_schema5_forecast(payload)
 
 
@@ -204,7 +243,9 @@ def test_three_coordinators_keep_schema5_diagnostics_entry_local() -> None:
     ] == ["plan-b", "plan-c"]
 
 
-@pytest.mark.parametrize("plan_kind", ("live", "advisory", "replay"))
+@pytest.mark.parametrize(
+    "plan_kind", ("live", "import_for_export_advisory", "sandbox_replay")
+)
 def test_schema5_preserves_all_action_semantics(plan_kind: str) -> None:
     """Live, advisory, and replay expose exact backend action fields unchanged."""
     payload = _payload()
@@ -264,7 +305,7 @@ def test_import_for_export_decision_selected_and_disabled() -> None:
     assert ImportForExportDecisionSensor(_Runtime(disabled), "entry-1").native_value == "disabled"
 
     advisory_payload = deepcopy(payload)
-    advisory_payload["planKind"] = "advisory"
+    advisory_payload["planKind"] = "import_for_export_advisory"
     advisory_payload["importForExportEnabled"] = True
     advisory_payload["importForExportAdvisoryEnabled"] = False
     advisory_payload["periods"][0]["recommendedAction"] = "import_for_export"
@@ -275,7 +316,11 @@ def test_import_for_export_decision_selected_and_disabled() -> None:
 
 @pytest.mark.parametrize(
     ("plan_kind", "authoritative_action"),
-    (("live", "executableAction"), ("advisory", "recommendedAction"), ("replay", "simulationAction")),
+    (
+        ("live", "executableAction"),
+        ("import_for_export_advisory", "recommendedAction"),
+        ("sandbox_replay", "simulationAction"),
+    ),
 )
 def test_import_for_export_uses_the_action_authoritative_for_each_plan_kind(
     plan_kind: str, authoritative_action: str

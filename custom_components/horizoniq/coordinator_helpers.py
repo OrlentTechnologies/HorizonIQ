@@ -17,7 +17,7 @@ from .models import (
     RegistrationData,
     TrialData,
 )
-from .forecast_schema5 import parse_schema5_forecast
+from .forecast_schema5 import Schema5Forecast, parse_schema5_forecast
 
 
 def extract_first(payload: Mapping[str, object], keys: Iterable[str]) -> object | None:
@@ -170,10 +170,21 @@ def normalize_periods(payload: Mapping[str, object] | None) -> list[ForecastPeri
     return normalized_periods
 
 
-def normalize_forecast(payload: Mapping[str, object] | None) -> ForecastData:
+def normalize_forecast(
+    payload: Mapping[str, object] | None,
+    *,
+    _canonical_schema5: bool = False,
+) -> ForecastData:
     """Normalize a forecast payload into the integration's stable shape."""
     if not isinstance(payload, Mapping):
         return {}
+
+    if not _canonical_schema5:
+        schema5_forecast = parse_schema5_forecast(payload)
+        if schema5_forecast is not None:
+            return normalize_forecast(
+                schema5_forecast.to_dict(), _canonical_schema5=True
+            )
 
     forecast_source = _extract_forecast_source(payload)
     normalized: ForecastData = {}
@@ -626,6 +637,8 @@ def build_snapshot(payload: Mapping[str, object] | None) -> HorizonIQSnapshot:
         return HorizonIQSnapshot()
 
     schema5_forecast = parse_schema5_forecast(payload)
+    if schema5_forecast is not None:
+        return _schema5_snapshot(schema5_forecast, payload)
     forecast = dict(normalize_forecast(payload))
     trial = normalize_trial(payload)
     periods = forecast.get("periods") or normalize_periods(payload)
@@ -727,6 +740,33 @@ def build_snapshot(payload: Mapping[str, object] | None) -> HorizonIQSnapshot:
         forecast_hash=forecast_hash,
         registration_data=registration_data,
         forecast_cadence_minutes=forecast_cadence_minutes,
+    )
+
+
+def _schema5_snapshot(
+    schema5_forecast: Schema5Forecast,
+    payload: Mapping[str, object],
+) -> HorizonIQSnapshot:
+    """Derive every schema-5 consumer view from the one accepted contract."""
+    canonical = schema5_forecast.to_dict()
+    forecast = dict(normalize_forecast(canonical, _canonical_schema5=True))
+    periods = forecast.get("periods", [])
+    assert isinstance(periods, list)
+    direct_forecast = normalize_direct_forecast(forecast)
+    trial = normalize_trial(payload)
+    return HorizonIQSnapshot(
+        forecast=forecast,
+        schema5_forecast=schema5_forecast,
+        direct_forecast=direct_forecast,
+        trial=trial,
+        forecast_periods=periods,
+        currency=None,
+        target_capacity=schema5_forecast.target_capacity,
+        should_import=schema5_forecast.should_import,
+        total_cost=schema5_forecast.total_cost,
+        charging_cost=schema5_forecast.charging_cost,
+        saving=schema5_forecast.saving,
+        forecast_cadence_minutes=schema5_forecast.forecast_cadence_minutes,
     )
 
 

@@ -187,8 +187,7 @@ def _selected_action(
     if accepted is not None:
         action_field = {
             "live": "executable_action",
-            "advisory": "recommended_action",
-            "replay": "simulation_action",
+            "import_for_export_advisory": "recommended_action",
             "sandbox_replay": "simulation_action",
         }[accepted.plan_kind]
         for period in accepted.periods:

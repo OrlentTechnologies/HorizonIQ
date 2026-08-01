@@ -719,6 +719,15 @@ class HorizonIQEntryRuntime:
                 command_ledger,
                 control_config,
             ) = self._validated_storage_record(record)
+            migrate_corrupted_ledger = _requires_ledger_migration(record)
+            if migrate_corrupted_ledger:
+                snapshot = _snapshot_without_corrupted_ledger(snapshot)
+                snapshots = {
+                    name: to_json(
+                        _snapshot_without_corrupted_ledger(from_json(snapshot_json))
+                    )
+                    for name, snapshot_json in snapshots.items()
+                }
             faults, fault_snapshots = self._validated_fault_storage(
                 record, expected_snapshot_names=set(snapshots)
             )
@@ -737,6 +746,11 @@ class HorizonIQEntryRuntime:
             await self._async_restore_replay_state(replay_state)
             if enabled:
                 await self.async_enable(hass)
+            if migrate_corrupted_ledger:
+                self.storage_diagnostic = (
+                    "Migrated schema-10 simulator ledgers; cumulative ledgers were reset."
+                )
+                await self.async_checkpoint(immediate=True)
         except (HomeAssistantError, NotImplementedError, ValueError, TypeError, KeyError):
             self.storage_diagnostic = (
                 "Stored simulator state is incompatible or invalid; using a disabled default."
@@ -1524,7 +1538,7 @@ class HorizonIQEntryRuntime:
         record = record_mapping(record_value)
         if record is None:
             raise ValueError("Stored fault state is invalid")
-        if record.get("storage_schema_version") not in {5, 6, 7, 8, 9, STORAGE_SCHEMA_VERSION}:
+        if record.get("storage_schema_version") not in {5, 6, 7, 8, 9, 10, STORAGE_SCHEMA_VERSION}:
             return (), {}
         faults = validate_faults(record.get("faults"))
         raw_snapshots = record.get("fault_snapshots")
@@ -1552,9 +1566,9 @@ class HorizonIQEntryRuntime:
         if record is None:
             raise ValueError("Stored state is not an object")
         storage_schema = record.get("storage_schema_version")
-        if storage_schema not in {1, 2, 3, 4, 5, 6, 7, 8, 9, STORAGE_SCHEMA_VERSION}:
+        if storage_schema not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, STORAGE_SCHEMA_VERSION}:
             raise ValueError("Unsupported storage schema")
-        if record.get("snapshot_schema_version") not in {1, 2, SNAPSHOT_SCHEMA_VERSION}:
+        if record.get("snapshot_schema_version") not in {1, 2, 3, SNAPSHOT_SCHEMA_VERSION}:
             raise ValueError("Unsupported snapshot schema")
         if record.get("entry_id") != self.entry_id:
             raise ValueError("Stored entry identity does not match")
@@ -1570,7 +1584,7 @@ class HorizonIQEntryRuntime:
         control_config = self._config
         if control_config is None:
             raise ValueError("Sandbox configuration is unavailable")
-        if storage_schema in {8, 9, STORAGE_SCHEMA_VERSION}:
+        if storage_schema in {8, 9, 10, STORAGE_SCHEMA_VERSION}:
             control_config = _control_config_from_storage(
                 record.get("control_config"),
                 fallback=control_config,
@@ -1588,7 +1602,7 @@ class HorizonIQEntryRuntime:
             self._validated_snapshot(from_json(snapshot_json), config=control_config)
             snapshots[normalized] = snapshot_json
         profile_state: tuple[str | None, str | None, str] = (None, None, "stopped")
-        if storage_schema in {2, 3, 4, 5, 6, 7, 8, 9, STORAGE_SCHEMA_VERSION}:
+        if storage_schema in {2, 3, 4, 5, 6, 7, 8, 9, 10, STORAGE_SCHEMA_VERSION}:
             filename = record.get("selected_profile_filename")
             profile_hash = record.get("profile_hash")
             playback_state = record.get("playback_state")
@@ -1612,7 +1626,7 @@ class HorizonIQEntryRuntime:
             False,
             False,
         )
-        if storage_schema in {3, 4, 5, 6, 7, 8, 9, STORAGE_SCHEMA_VERSION}:
+        if storage_schema in {3, 4, 5, 6, 7, 8, 9, 10, STORAGE_SCHEMA_VERSION}:
             session_value = record.get("replay_session")
             starting_energy = record.get("replay_starting_energy_wh")
             import_for_export = record.get("replay_import_for_export_enabled")
@@ -1620,12 +1634,12 @@ class HorizonIQEntryRuntime:
             pending_resume = record.get("replay_pending_resume")
             auto_resume = (
                 record.get("replay_auto_resume_pending")
-                if storage_schema in {4, 5, 6, 7, 8, 9, STORAGE_SCHEMA_VERSION}
+                if storage_schema in {4, 5, 6, 7, 8, 9, 10, STORAGE_SCHEMA_VERSION}
                 else None
             )
             simulate_api_failure = (
                 record.get("replay_simulate_api_failure")
-                if storage_schema in {8, 9, STORAGE_SCHEMA_VERSION}
+                if storage_schema in {8, 9, 10, STORAGE_SCHEMA_VERSION}
                 else False
             )
             if session_value is None:
@@ -1637,7 +1651,7 @@ class HorizonIQEntryRuntime:
                         export_for_solar_headroom,
                     )
                 ) or pending_resume is not False or (
-                    storage_schema in {4, 5, 6, 7, 8, 9, STORAGE_SCHEMA_VERSION} and auto_resume is not False
+                    storage_schema in {4, 5, 6, 7, 8, 9, 10, STORAGE_SCHEMA_VERSION} and auto_resume is not False
                 ) or simulate_api_failure is not False:
                     raise ValueError("Stored replay state is invalid")
             else:
@@ -1656,7 +1670,7 @@ class HorizonIQEntryRuntime:
                     export_for_solar_headroom, bool
                 ) or not isinstance(pending_resume, bool):
                     raise ValueError("Stored replay settings are invalid")
-                if storage_schema in {4, 5, 6, 7, 8, 9, STORAGE_SCHEMA_VERSION} and not isinstance(auto_resume, bool):
+                if storage_schema in {4, 5, 6, 7, 8, 9, 10, STORAGE_SCHEMA_VERSION} and not isinstance(auto_resume, bool):
                     raise ValueError("Stored replay resume state is invalid")
                 if not isinstance(simulate_api_failure, bool):
                     raise ValueError("Stored replay simulated API failure state is invalid")
@@ -1670,7 +1684,7 @@ class HorizonIQEntryRuntime:
                     pending_resume,
                     (
                         auto_resume
-                        if storage_schema in {4, 5, 6, 7, 8, 9, STORAGE_SCHEMA_VERSION}
+                        if storage_schema in {4, 5, 6, 7, 8, 9, 10, STORAGE_SCHEMA_VERSION}
                         else session.state in _REPLAY_ACTIVE_STATES or pending_resume
                     ),
                     simulate_api_failure,
@@ -1681,7 +1695,7 @@ class HorizonIQEntryRuntime:
                 record.get("accepted_command_ids"),
                 snapshot.clock_state.virtual_time_utc,
             )
-            if storage_schema in {6, 7, 8, 9, STORAGE_SCHEMA_VERSION}
+            if storage_schema in {6, 7, 8, 9, 10, STORAGE_SCHEMA_VERSION}
             else ()
         )
         return (
@@ -3350,6 +3364,23 @@ def _control_config_to_storage(config: BatteryConfig | None) -> dict[str, float]
     if config is None:
         raise ValueError("Sandbox configuration is unavailable")
     return {field_name: getattr(config, field_name) for field_name in _CONTROL_CONFIG_FIELDS}
+
+
+def _requires_ledger_migration(record: Mapping[str, object]) -> bool:
+    """Identify only the schema pair written by the positional-ledger defect."""
+    return (
+        record.get("storage_schema_version") == 10
+        and record.get("snapshot_schema_version") == 3
+    )
+
+
+def _snapshot_without_corrupted_ledger(snapshot: SimulationSnapshot) -> SimulationSnapshot:
+    """Preserve replayable state while clearing values written with shifted fields."""
+    return replace(
+        snapshot,
+        schema_version=SNAPSHOT_SCHEMA_VERSION,
+        cumulative_ledger=IntervalLedger(),
+    )
 
 
 def _control_config_from_storage(

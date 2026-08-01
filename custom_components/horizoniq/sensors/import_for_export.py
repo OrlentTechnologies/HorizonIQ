@@ -62,7 +62,7 @@ class ImportForExportDecisionSensor(SensorEntity):
             return "not_planned"
         enabled = (
             forecast.import_for_export_advisory_enabled
-            if forecast.plan_kind == "advisory"
+            if forecast.plan_kind == "import_for_export_advisory"
             else forecast.import_for_export_enabled
         )
         if not enabled:
@@ -119,7 +119,7 @@ class ImportForExportDecisionSensor(SensorEntity):
             "import_for_export_advisory_enabled": (
                 forecast.import_for_export_advisory_enabled
             ),
-            "price_limit": forecast.economics_assumptions.get("priceLimit"),
+            "price_limit": forecast.economics_assumptions.get("importForExportLimit"),
             "selected_periods": [period.to_dict() for period in selected],
             "rejected_periods": rejected,
             "period_prices": period_prices,
@@ -156,8 +156,7 @@ def _selects_import_for_export(period: Schema5Period, plan_kind: str) -> bool:
     """Apply the schema's plan-kind action authority without inventing a command."""
     action = {
         "live": period.executable_action,
-        "advisory": period.recommended_action,
-        "replay": period.simulation_action,
+        "import_for_export_advisory": period.recommended_action,
         "sandbox_replay": period.simulation_action,
     }[plan_kind]
     return action == "import_for_export"

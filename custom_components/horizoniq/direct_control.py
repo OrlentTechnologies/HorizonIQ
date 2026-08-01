@@ -9,6 +9,7 @@ import math
 from typing import Mapping
 from uuid import UUID
 
+from .forecast_schema5 import Schema5ForecastError, parse_schema5_forecast
 from .models import DirectEquipmentProfile, DirectForecastPeriod, Forecast
 from .simulation.models import BatteryConfig, Command, OperatingMode
 
@@ -456,27 +457,14 @@ def _command_from_action(
 
 
 def _canonical_contract(payload: Mapping[str, object]) -> dict[str, object]:
-    """Map the coordinator's stable snake-case view back to schema-5 names."""
-    canonical = dict(payload)
-    for normalized, contract_name in _NORMALIZED_TOP_LEVEL_FIELDS.items():
-        if contract_name not in canonical and normalized in canonical:
-            canonical[contract_name] = canonical[normalized]
-
-    periods = canonical.get("periods")
-    if not isinstance(periods, list):
-        return canonical
-    canonical_periods: list[object] = []
-    for period in periods:
-        if not isinstance(period, Mapping):
-            canonical_periods.append(period)
-            continue
-        canonical_period = dict(period)
-        for normalized, contract_name in _NORMALIZED_PERIOD_FIELDS.items():
-            if contract_name not in canonical_period and normalized in canonical_period:
-                canonical_period[contract_name] = canonical_period[normalized]
-        canonical_periods.append(canonical_period)
-    canonical["periods"] = canonical_periods
-    return canonical
+    """Parse the same canonical schema-5 contract used by coordinator views."""
+    try:
+        forecast = parse_schema5_forecast(payload)
+    except Schema5ForecastError as err:
+        raise ValueError("Forecast schema is invalid") from err
+    if forecast is None:
+        raise ValueError("Forecast schema is unsupported")
+    return forecast.to_dict()
 
 
 def _text(value: object, name: str) -> str:

@@ -27,5 +27,5 @@ def simulate_step(*, previous: BatteryState, elapsed_seconds: float, virtual_tim
     else:
         battery = -min(-battery, (start-config.reserve_wh)*config.discharge_efficiency/hours); increase=0.; decrease=-battery*hours/config.discharge_efficiency; charge_loss=0.; discharge_loss=decrease+battery*hours
     end=start+increase-decrease; grid=load_w+battery-solar_w; grid_wh=grid*hours; gi=max(0.,grid_wh); ge=max(0.,-grid_wh); solar=solar_w*hours; load=load_w*hours
-    error=gi+solar+decrease-(load+ge+increase+charge_loss+discharge_loss); ledger=IntervalLedger(gi,ge,solar,load,increase,decrease,charge_loss,discharge_loss,start,end,error); health=SimulationHealth.HEALTHY if abs(error)<=config.balance_tolerance_wh else SimulationHealth.UNHEALTHY
+    error=gi+solar+decrease-(load+ge+increase+charge_loss+discharge_loss); ledger=IntervalLedger(grid_import_wh=gi,grid_export_wh=ge,solar_generation_wh=solar,load_consumption_wh=load,battery_energy_increase_wh=increase,battery_energy_decrease_wh=decrease,charge_conversion_loss_wh=charge_loss,discharge_conversion_loss_wh=discharge_loss,start_battery_energy_wh=start,end_battery_energy_wh=end,balance_error_wh=error); health=SimulationHealth.HEALTHY if abs(error)<=config.balance_tolerance_wh else SimulationHealth.UNHEALTHY
     return StepResult(BatteryState(end),grid,battery,status,ledger,health,reason)

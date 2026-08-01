@@ -284,6 +284,13 @@ async def test_soc_validation_persistence_snapshots_and_isolation(hass) -> None:
     assert runtime.energy_wh == 7_500
     assert runtime.energy_ledger.manual_adjustment_wh == 2_500
 
+    before_manual_adjustment = runtime.energy_ledger.manual_adjustment_wh
+    await runtime.async_set_state_of_charge(80)
+    assert runtime.energy_wh == 8_000
+    assert runtime.energy_ledger.manual_adjustment_wh == (
+        before_manual_adjustment + 500
+    )
+
     await runtime.async_unload()
     with pytest.raises(ValueError, match="inactive"):
         await runtime.async_set_state_of_charge(80)

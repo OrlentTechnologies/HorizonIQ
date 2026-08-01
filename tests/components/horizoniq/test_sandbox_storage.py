@@ -1,6 +1,7 @@
 """Tests for private, entry-scoped virtual-battery persistence."""
 
 from datetime import datetime, timezone
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -194,6 +195,58 @@ async def test_schema_one_record_migrates_without_losing_state_or_snapshots(hass
     await restored.async_checkpoint(immediate=True)
     migrated = await SandboxStorage(hass, "storage-schema-one").async_load()
     assert migrated is not None and migrated["storage_schema_version"] == STORAGE_SCHEMA_VERSION
+
+
+async def test_schema_ten_ledger_migration_resets_only_corrupted_ledgers(hass) -> None:
+    """The positional-ledger release keeps state but clears current and named totals."""
+    runtime, _ = _runtime("storage-ledger-migration", REGISTRATION_A)
+    await runtime.async_restore_storage(hass)
+    await _enable(runtime, hass)
+    runtime.set_inputs(load_w=750, solar_w=100)
+    await runtime.async_step(30)
+    await runtime.async_save_snapshot("before")
+    assert runtime._storage is not None
+    record = runtime._storage_record()
+    record["storage_schema_version"] = 10
+    record["snapshot_schema_version"] = 3
+    for key in ("current_snapshot",):
+        snapshot = json.loads(record[key])
+        snapshot["schema_version"] = 3
+        snapshot["cumulative_ledger"]["manual_adjustment_wh"] = 999.0
+        snapshot["cumulative_ledger"]["balance_error_wh"] = 888.0
+        record[key] = json.dumps(snapshot, separators=(",", ":"))
+    snapshots = record["snapshots"]
+    assert isinstance(snapshots, dict)
+    for name, serialized in snapshots.items():
+        snapshot = json.loads(serialized)
+        snapshot["schema_version"] = 3
+        snapshot["cumulative_ledger"]["manual_adjustment_wh"] = 777.0
+        snapshots[name] = json.dumps(snapshot, separators=(",", ":"))
+    await runtime._storage.async_save(record)
+
+    restored, _ = _runtime("storage-ledger-migration", REGISTRATION_A)
+    await restored.async_restore_storage(hass)
+
+    assert restored.energy_wh == runtime.energy_wh
+    assert restored.virtual_time_utc == runtime.virtual_time_utc
+    assert restored.energy_ledger == IntervalLedger()
+    assert restored.storage_diagnostic is not None
+    await restored.async_restore_snapshot("before")
+    assert restored.energy_ledger == IntervalLedger()
+    migrated = await SandboxStorage(hass, "storage-ledger-migration").async_load()
+    assert migrated is not None
+    assert migrated["storage_schema_version"] == STORAGE_SCHEMA_VERSION
+    assert migrated["snapshot_schema_version"] == 4
+
+    reloaded, _ = _runtime("storage-ledger-migration", REGISTRATION_A)
+    with patch(
+        "custom_components.horizoniq.sandbox_runtime.mqtt.async_subscribe",
+        new=AsyncMock(return_value=lambda: None),
+    ):
+        await reloaded.async_restore_storage(hass)
+    assert reloaded.energy_wh == runtime.energy_wh
+    assert reloaded.energy_ledger == IntervalLedger()
+    assert reloaded.storage_diagnostic is None
 
 
 async def test_reserve_validation_rejects_snapshot_atomically(hass) -> None:

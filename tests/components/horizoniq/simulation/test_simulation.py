@@ -45,6 +45,13 @@ def test_balance_and_cumulative_ledger_are_explicit():
     result=step(load_w=1000)
     assert result.health is SimulationHealth.HEALTHY and abs(result.ledger.balance_error_wh)<.01
     assert IntervalLedger().plus(result.ledger)==result.ledger
+def test_normal_ticks_never_create_manual_adjustments():
+    state=BatteryState(5000); cumulative=IntervalLedger()
+    for index in range(1000):
+        result=step(previous=state,virtual_time_utc=NOW+timedelta(seconds=30*index),load_w=800,solar_w=250,elapsed_seconds=30)
+        state=result.state; cumulative=cumulative.plus(result.ledger)
+    assert cumulative.manual_adjustment_wh==0
+    assert abs(cumulative.balance_error_wh)<CONFIG.balance_tolerance_wh
 def test_clock_rates_step_reset_and_isolation():
     first=VirtualClock(NOW); second=VirtualClock(NOW,ClockRate.X10)
     assert first.advance(10).virtual_time_utc==NOW
@@ -63,7 +70,7 @@ def test_profile_validation_cursor_and_limit():
     with pytest.raises(ValueError): validate_profile(SyntheticProfile(1,"long",periods*745),CONFIG)
 def test_snapshot_round_trip_reproduces_next_step_exactly():
     result=step(load_w=400); clock=VirtualClock(NOW,ClockRate.X60); clock.advance(1)
-    snapshot=SimulationSnapshot(3,result.state,result.ledger,clock.state,"p",ProfileCursor("p"),Command(OperatingMode.IDLE),CommandStatus.APPLIED)
+    snapshot=SimulationSnapshot(4,result.state,result.ledger,clock.state,"p",ProfileCursor("p"),Command(OperatingMode.IDLE),CommandStatus.APPLIED)
     restored=from_json(to_json(snapshot))
     assert restored==snapshot
     assert step(previous=restored.battery_state,virtual_time_utc=restored.clock_state.virtual_time_utc,load_w=400)==step(previous=snapshot.battery_state,virtual_time_utc=snapshot.clock_state.virtual_time_utc,load_w=400)

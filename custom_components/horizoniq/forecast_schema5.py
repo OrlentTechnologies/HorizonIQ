@@ -10,9 +10,7 @@ import math
 
 
 SCHEMA_VERSION = 5
-# ``sandbox_replay`` remains readable for locally persisted direct-replay
-# responses while Solar's schema-5 contract uses ``replay``.
-PLAN_KINDS = frozenset({"live", "advisory", "replay", "sandbox_replay"})
+PLAN_KINDS = frozenset({"live", "import_for_export_advisory", "sandbox_replay"})
 REASON_CODES = frozenset(
     {
         "none",
@@ -68,6 +66,201 @@ _NORMALIZED_PROHIBITED_DIAGNOSTIC_KEYS = frozenset(
 
 class Schema5ForecastError(ValueError):
     """Raised when a schema-5 forecast is incomplete or malformed."""
+
+
+def adapt_schema5_wire(payload: Mapping[str, object]) -> dict[str, object] | None:
+    """Adapt Solar's documented wire aliases into one canonical schema-5 object.
+
+    This is deliberately an allow-list adapter.  It recognizes only the
+    documented PascalCase, camelCase, and historical snake_case spellings, and
+    refuses a response that gives two spellings different values.  Credentials
+    and registration data are never copied into the canonical object.
+    """
+    if not isinstance(payload, Mapping):
+        raise Schema5ForecastError("forecast payload must be an object")
+    source = _forecast_source(payload)
+    if _alias_value(source, "schemaVersion") is _MISSING:
+        return None
+    return _adapt_object(
+        source,
+        _FORECAST_FIELDS,
+        children={
+            "economicsAssumptions": (_ECONOMICS_FIELDS, {}),
+            "plannedEnergyLedger": (_LEDGER_FIELDS, {}),
+            "equipmentProfile": (
+                _EQUIPMENT_FIELDS,
+                {"supportedControl": (_CONTROL_FIELDS, {})},
+            ),
+            "periods": (
+                _PERIOD_FIELDS,
+                {
+                    "decisionTrace": (
+                        _TRACE_FIELDS,
+                        {
+                            "constraints": (_CONSTRAINT_FIELDS, {}),
+                            "economicCalculation": (
+                                _ECONOMIC_CALCULATION_FIELDS,
+                                {},
+                            ),
+                            "rejectedCandidateActions": (
+                                _REJECTED_ACTION_FIELDS,
+                                {},
+                            ),
+                        },
+                    )
+                },
+            ),
+        },
+    )
+
+
+_MISSING = object()
+
+
+def _pascal(name: str) -> str:
+    return name[:1].upper() + name[1:]
+
+
+def _snake(name: str) -> str:
+    result: list[str] = []
+    for character in name:
+        if character.isupper():
+            result.extend(("_", character.lower()))
+        else:
+            result.append(character)
+    return "".join(result)
+
+
+def _aliases(name: str) -> tuple[str, ...]:
+    """Return the finite aliases explicitly supported for one contract field."""
+    if name == "periods":
+        return ("periods", "Periods", "forecastPeriods", "ForecastPeriods")
+    return (name, _pascal(name), _snake(name))
+
+
+_FORECAST_FIELDS = (
+    "schemaVersion",
+    "planId",
+    "planKind",
+    "importForExportEnabled",
+    "importForExportAdvisoryEnabled",
+    "createdAtUtc",
+    "effectiveAtUtc",
+    "economicsAssumptions",
+    "plannedEnergyLedger",
+    "equipmentProfile",
+    "currentCapacity",
+    "minCapacity",
+    "targetCapacity",
+    "lowPrice",
+    "mediumPrice",
+    "batteryManagementSystemState",
+    "shouldImport",
+    "shouldUseGrid",
+    "forecastCadenceMinutes",
+    "totalCost",
+    "chargingCost",
+    "saving",
+    "periods",
+)
+_ECONOMICS_FIELDS = (
+    "exportRate", "chargeEfficiency", "dischargeEfficiency", "degradationCost",
+    "supplierFeeAllowance", "uncertaintyHaircut", "minimumNetValue",
+    "importForExportLimit", "exportRateUnit", "degradationCostUnit",
+    "supplierFeeAllowanceUnit", "minimumNetValueUnit", "importForExportLimitUnit",
+    "chargeEfficiencyUnit", "dischargeEfficiencyUnit", "uncertaintyHaircutUnit",
+)
+_LEDGER_FIELDS = (
+    "gridImportKwh", "solarGenerationKwh", "loadKwh", "batteryChargeKwh",
+    "batteryDischargeKwh", "gridExportKwh", "modeledLossesKwh", "balanceErrorKwh",
+    "toleranceKwh", "healthy",
+)
+_EQUIPMENT_FIELDS = (
+    "id", "version", "source", "displayName", "batteryCapacityWh",
+    "minimumCapacityPercentage", "maximumBatteryChargePowerWatts",
+    "maximumBatteryDischargePowerWatts", "inverterMaximumChargePowerWatts",
+    "inverterMaximumDischargePowerWatts", "maximumGridImportPowerWatts",
+    "maximumGridExportPowerWatts", "controlAdapterId", "supportedControl",
+    "productionExportEnabled", "safeFallbackId",
+)
+_CONTROL_FIELDS = (
+    "requiredCharging", "useGrid", "importForExport", "profitableExport",
+    "solarHeadroomExport",
+)
+_PERIOD_FIELDS = (
+    "period", "date", "price", "shouldImport", "shouldUseGrid",
+    "recommendedAction", "simulationAction", "executableAction", "commandId",
+    "issuedAtUtc", "expiresAtUtc", "actionPriority", "expectedImport",
+    "expectedExport", "expectedStartSoc", "expectedEndSoc", "expectedCost",
+    "expectedRevenue", "expectedNetValue", "amount", "imported", "exported",
+    "estimatedGeneration", "used", "battery", "batteryManagementSystemState",
+    "decisionTrace",
+)
+_TRACE_FIELDS = (
+    "selectedAction", "reasonCode", "explanation", "rejectedCandidateActions",
+    "importRate", "exportRate", "expectedImportKwh", "expectedExportKwh",
+    "expectedStartSocKwh", "expectedEndSocKwh", "constraints",
+    "economicCalculation",
+)
+_REJECTED_ACTION_FIELDS = ("action", "reasonCode", "explanation")
+_CONSTRAINT_FIELDS = (
+    "reserveKwh", "availableHeadroomKwh", "chargePowerLimitKwh",
+    "dischargePowerLimitKwh",
+)
+_ECONOMIC_CALCULATION_FIELDS = (
+    "importCost", "exportRevenue", "supplierFees", "degradationCost",
+    "grossValue", "riskAdjustedNetValue",
+)
+
+
+def _alias_value(source: Mapping[str, object], field: str) -> object:
+    """Read one explicit alias, rejecting conflicting spellings atomically."""
+    values = [(alias, source[alias]) for alias in _aliases(field) if alias in source]
+    if not values:
+        return _MISSING
+    first = values[0][1]
+    if any(value != first for _, value in values[1:]):
+        names = ", ".join(alias for alias, _ in values)
+        raise Schema5ForecastError(f"Conflicting aliases for {field}: {names}")
+    return first
+
+
+def _adapt_object(
+    source: Mapping[str, object],
+    fields: tuple[str, ...],
+    *,
+    children: Mapping[str, tuple[tuple[str, ...], Mapping[str, object]]],
+) -> dict[str, object]:
+    """Copy only supported aliases, recursively adapting declared child objects."""
+    if fields is not _FORECAST_FIELDS and any(
+        isinstance(key, str)
+        and key.lower().replace("_", "").replace("-", "")
+        in _NORMALIZED_PROHIBITED_DIAGNOSTIC_KEYS
+        for key in source
+    ):
+        raise Schema5ForecastError("schema-5 diagnostics contain a prohibited key")
+    result: dict[str, object] = {}
+    for field in fields:
+        value = _alias_value(source, field)
+        if value is _MISSING:
+            continue
+        child = children.get(field)
+        if child is not None:
+            child_fields, grandchildren = child
+            if isinstance(value, list):
+                result[field] = [
+                    _adapt_object(item, child_fields, children=grandchildren)
+                    if isinstance(item, Mapping)
+                    else item
+                    for item in value
+                ]
+            elif isinstance(value, Mapping):
+                result[field] = _adapt_object(value, child_fields, children=grandchildren)
+            else:
+                result[field] = value
+        else:
+            result[field] = deepcopy(value)
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,7 +327,7 @@ class Schema5Period:
     estimated_generation: float
     used: float
     battery: float
-    battery_management_system_state: str
+    battery_management_system_state: str | int
     decision_trace: Schema5DecisionTrace
 
     def to_dict(self) -> dict[str, object]:
@@ -183,16 +376,16 @@ class Schema5Forecast:
     effective_at_utc: str
     economics_assumptions: dict[str, object]
     planned_energy_ledger: dict[str, object]
-    equipment_profile: dict[str, object]
+    equipment_profile: dict[str, object] | None
     current_capacity: float
     min_capacity: float
     target_capacity: float
     low_price: float
     medium_price: float
-    battery_management_system_state: str
+    battery_management_system_state: str | int
     should_import: bool
     should_use_grid: bool
-    forecast_cadence_minutes: int
+    forecast_cadence_minutes: int | None
     total_cost: float
     charging_cost: float
     saving: float
@@ -234,10 +427,8 @@ class Schema5Forecast:
 
 def parse_schema5_forecast(payload: Mapping[str, object]) -> Schema5Forecast | None:
     """Parse a complete schema-5 forecast or reject it before any state changes."""
-    if not isinstance(payload, Mapping):
-        raise Schema5ForecastError("forecast payload must be an object")
-    source = _forecast_source(payload)
-    if "schemaVersion" not in source:
+    source = adapt_schema5_wire(payload)
+    if source is None:
         return None
     if _integer(source, "schemaVersion") != SCHEMA_VERSION:
         raise Schema5ForecastError("Unsupported forecast schemaVersion")
@@ -246,6 +437,19 @@ def parse_schema5_forecast(payload: Mapping[str, object]) -> Schema5Forecast | N
     if not isinstance(periods_value, list):
         raise Schema5ForecastError("periods must be a list")
     periods = tuple(_period(item) for item in periods_value)
+    economics_assumptions = _complete_object(
+        source, "economicsAssumptions", _ECONOMICS_FIELDS
+    )
+    planned_energy_ledger = _complete_object(
+        source, "plannedEnergyLedger", _LEDGER_FIELDS
+    )
+    equipment_profile = _optional_complete_object(
+        source, "equipmentProfile", _EQUIPMENT_FIELDS
+    )
+    if equipment_profile is not None:
+        equipment_profile["supportedControl"] = _complete_object(
+            equipment_profile, "supportedControl", _CONTROL_FIELDS
+        )
     return Schema5Forecast(
         schema_version=SCHEMA_VERSION,
         plan_id=_text(source, "planId"),
@@ -256,18 +460,20 @@ def parse_schema5_forecast(payload: Mapping[str, object]) -> Schema5Forecast | N
         ),
         created_at_utc=_timestamp(source, "createdAtUtc"),
         effective_at_utc=_timestamp(source, "effectiveAtUtc"),
-        economics_assumptions=_object(source, "economicsAssumptions"),
-        planned_energy_ledger=_object(source, "plannedEnergyLedger"),
-        equipment_profile=_object(source, "equipmentProfile"),
+        economics_assumptions=economics_assumptions,
+        planned_energy_ledger=planned_energy_ledger,
+        equipment_profile=equipment_profile,
         current_capacity=_number(source, "currentCapacity"),
         min_capacity=_number(source, "minCapacity"),
         target_capacity=_number(source, "targetCapacity"),
         low_price=_number(source, "lowPrice"),
         medium_price=_number(source, "mediumPrice"),
-        battery_management_system_state=_text(source, "batteryManagementSystemState"),
+        battery_management_system_state=_bms_state(source, "batteryManagementSystemState"),
         should_import=_boolean(source, "shouldImport"),
         should_use_grid=_boolean(source, "shouldUseGrid"),
-        forecast_cadence_minutes=_positive_integer(source, "forecastCadenceMinutes"),
+        forecast_cadence_minutes=_optional_positive_integer(
+            source, "forecastCadenceMinutes"
+        ),
         total_cost=_number(source, "totalCost"),
         charging_cost=_number(source, "chargingCost"),
         saving=_number(source, "saving"),
@@ -284,27 +490,38 @@ def _forecast_source(payload: Mapping[str, object]) -> Mapping[str, object]:
     contract.  The wrapper fallback keeps the parser compatible with the
     ``Forecast``/``forecast``/``forecastEntity`` response shapes.
     """
-    if "schemaVersion" in payload and "periods" in payload:
+    if _has_schema_alias(payload) and _has_periods_alias(payload):
         return payload
-    for key in ("Forecast", "forecast", "forecastEntity"):
+    for key in ("Forecast", "forecast", "forecastEntity", "ForecastEntity"):
         candidate = payload.get(key)
         if (
             isinstance(candidate, Mapping)
-            and "schemaVersion" in candidate
-            and "periods" in candidate
+            and _has_schema_alias(candidate)
+            and _has_periods_alias(candidate)
         ):
             return candidate
-    if "schemaVersion" in payload:
+    if _has_schema_alias(payload):
         return payload
-    for key in ("Forecast", "forecast", "forecastEntity"):
+    for key in ("Forecast", "forecast", "forecastEntity", "ForecastEntity"):
         candidate = payload.get(key)
-        if isinstance(candidate, Mapping) and "schemaVersion" in candidate:
+        if isinstance(candidate, Mapping) and _has_schema_alias(candidate):
             return candidate
-    for key in ("Forecast", "forecast", "forecastEntity"):
+    for key in ("Forecast", "forecast", "forecastEntity", "ForecastEntity"):
         candidate = payload.get(key)
         if isinstance(candidate, Mapping):
             return candidate
     return payload
+
+
+def _has_schema_alias(source: Mapping[str, object]) -> bool:
+    return any(alias in source for alias in _aliases("schemaVersion"))
+
+
+def _has_periods_alias(source: Mapping[str, object]) -> bool:
+    return any(
+        alias in source
+        for alias in (*_aliases("periods"), "forecastPeriods", "ForecastPeriods")
+    )
 
 
 def _period(value: object) -> Schema5Period:
@@ -336,7 +553,9 @@ def _period(value: object) -> Schema5Period:
         estimated_generation=_number(value, "estimatedGeneration"),
         used=_number(value, "used"),
         battery=_number(value, "battery"),
-        battery_management_system_state=_text(value, "batteryManagementSystemState"),
+        battery_management_system_state=_bms_state(
+            value, "batteryManagementSystemState"
+        ),
         decision_trace=_decision_trace(value.get("decisionTrace")),
     )
 
@@ -349,6 +568,10 @@ def _decision_trace(value: object) -> Schema5DecisionTrace:
         raise Schema5ForecastError(
             "rejectedCandidateActions must be a safe JSON list"
         )
+    for candidate in rejected:
+        if not isinstance(candidate, Mapping):
+            raise Schema5ForecastError("rejectedCandidateActions must contain objects")
+        _complete_mapping(candidate, "rejectedCandidateAction", _REJECTED_ACTION_FIELDS)
     return Schema5DecisionTrace(
         selected_action=_text(value, "selectedAction"),
         reason_code=_choice(value, "reasonCode", REASON_CODES),
@@ -360,8 +583,10 @@ def _decision_trace(value: object) -> Schema5DecisionTrace:
         expected_export_kwh=_number(value, "expectedExportKwh"),
         expected_start_soc_kwh=_number(value, "expectedStartSocKwh"),
         expected_end_soc_kwh=_number(value, "expectedEndSocKwh"),
-        constraints=_object(value, "constraints"),
-        economic_calculation=_object(value, "economicCalculation"),
+        constraints=_complete_object(value, "constraints", _CONSTRAINT_FIELDS),
+        economic_calculation=_complete_object(
+            value, "economicCalculation", _ECONOMIC_CALCULATION_FIELDS
+        ),
     )
 
 
@@ -370,6 +595,45 @@ def _text(source: Mapping[str, object], key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise Schema5ForecastError(f"{key} must be non-empty text")
     return value
+
+
+def _complete_object(
+    source: Mapping[str, object], key: str, fields: tuple[str, ...]
+) -> dict[str, object]:
+    """Return one canonical nested contract object with every field present."""
+    return _complete_mapping(_object(source, key), key, fields)
+
+
+def _optional_complete_object(
+    source: Mapping[str, object], key: str, fields: tuple[str, ...]
+) -> dict[str, object] | None:
+    """Validate an optional schema-5 nested object without inventing a value."""
+    if key not in source or source[key] is None:
+        return None
+    return _complete_object(source, key, fields)
+
+
+def _complete_mapping(
+    value: Mapping[str, object], key: str, fields: tuple[str, ...]
+) -> dict[str, object]:
+    """Validate a nested canonical object that is already selected."""
+    result = dict(value)
+    missing = [field for field in fields if field not in result]
+    if missing:
+        raise Schema5ForecastError(
+            f"{key} is missing required fields: {', '.join(missing)}"
+        )
+    return result
+
+
+def _bms_state(source: Mapping[str, object], key: str) -> str | int:
+    """Preserve Solar's enum representation instead of inventing a local label."""
+    value = source.get(key)
+    if isinstance(value, str) and value.strip():
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    raise Schema5ForecastError(f"{key} must be a string or integer enum")
 
 
 def _required_optional_text(source: Mapping[str, object], key: str) -> str | None:
@@ -437,6 +701,13 @@ def _positive_integer(source: Mapping[str, object], key: str) -> int:
     if value <= 0:
         raise Schema5ForecastError(f"{key} must be positive")
     return value
+
+
+def _optional_positive_integer(source: Mapping[str, object], key: str) -> int | None:
+    """Validate an optional positive integral schema field."""
+    if key not in source or source[key] is None:
+        return None
+    return _positive_integer(source, key)
 
 
 def _boolean(source: Mapping[str, object], key: str) -> bool:

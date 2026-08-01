@@ -6,8 +6,36 @@
   "importForExportAdvisoryEnabled": true,
   "createdAtUtc": "2026-07-30T11:59:58Z",
   "effectiveAtUtc": "2026-07-30T12:00:00Z",
-  "economicsAssumptions": {"priceLimit": 0.22, "currency": "GBP"},
-  "plannedEnergyLedger": {"gridImportKwh": 2.0, "gridExportKwh": 0.5, "netValue": 0.31},
+  "economicsAssumptions": {
+    "exportRate": 0.05,
+    "chargeEfficiency": 0.95,
+    "dischargeEfficiency": 0.9,
+    "degradationCost": 0.01,
+    "supplierFeeAllowance": 0.01,
+    "uncertaintyHaircut": 0.05,
+    "minimumNetValue": 0.02,
+    "importForExportLimit": 0.22,
+    "exportRateUnit": "GBP/kWh",
+    "degradationCostUnit": "GBP/kWh",
+    "supplierFeeAllowanceUnit": "GBP/kWh",
+    "minimumNetValueUnit": "GBP/trade",
+    "importForExportLimitUnit": "GBP/kWh",
+    "chargeEfficiencyUnit": "ratio",
+    "dischargeEfficiencyUnit": "ratio",
+    "uncertaintyHaircutUnit": "ratio"
+  },
+  "plannedEnergyLedger": {
+    "gridImportKwh": 2.0,
+    "solarGenerationKwh": 0.3,
+    "loadKwh": 0.8,
+    "batteryChargeKwh": 1.5,
+    "batteryDischargeKwh": 0.0,
+    "gridExportKwh": 0.0,
+    "modeledLossesKwh": 0.08,
+    "balanceErrorKwh": 0.0,
+    "toleranceKwh": 0.001,
+    "healthy": true
+  },
   "equipmentProfile": {
     "id": "sandbox-virtual-battery-v1",
     "version": 3,
@@ -76,15 +104,15 @@
         "selectedAction": "charge_required",
         "reasonCode": "normal_charge_priority",
         "explanation": "Required charging has priority.",
-        "rejectedCandidateActions": ["import_for_export"],
+        "rejectedCandidateActions": [{"action": "import_for_export", "reasonCode": "normal_charge_priority", "explanation": "Required charging wins."}],
         "importRate": 0.11,
         "exportRate": 0.05,
         "expectedImportKwh": 2.0,
         "expectedExportKwh": 0.0,
         "expectedStartSocKwh": 14.4,
         "expectedEndSocKwh": 16.3,
-        "constraints": {"reserveKwh": 5.76},
-        "economicCalculation": {"netValue": -0.22}
+        "constraints": {"reserveKwh": 5.76, "availableHeadroomKwh": 14.4, "chargePowerLimitKwh": 2.0, "dischargePowerLimitKwh": 2.0},
+        "economicCalculation": {"importCost": 0.22, "exportRevenue": 0.0, "supplierFees": 0.01, "degradationCost": 0.01, "grossValue": -0.22, "riskAdjustedNetValue": -0.24}
       }
     },
     {
@@ -125,8 +153,8 @@
         "expectedExportKwh": 0.0,
         "expectedStartSocKwh": 16.3,
         "expectedEndSocKwh": 16.3,
-        "constraints": {"reserveKwh": 5.76},
-        "economicCalculation": {"netValue": 0.0}
+        "constraints": {"reserveKwh": 5.76, "availableHeadroomKwh": 12.5, "chargePowerLimitKwh": 2.0, "dischargePowerLimitKwh": 2.0},
+        "economicCalculation": {"importCost": 0.0, "exportRevenue": 0.0, "supplierFees": 0.0, "degradationCost": 0.0, "grossValue": 0.0, "riskAdjustedNetValue": 0.0}
       }
     }
   ]

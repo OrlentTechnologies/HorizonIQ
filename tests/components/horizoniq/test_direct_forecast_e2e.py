@@ -1,6 +1,7 @@
 """End-to-end paused direct-forecast lifecycle regressions."""
 
 import asyncio
+from copy import deepcopy
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +33,7 @@ from custom_components.horizoniq.simulation.models import BatteryConfig, Battery
 
 
 FIXTURE = Path(__file__).with_name("fixtures") / "deployed_schema5_normalized.json"
+SCHEMA5_FIXTURE = Path(__file__).with_name("fixtures") / "direct_schema5_forecast.json"
 NOW = datetime(2026, 7, 30, 12, 30, tzinfo=timezone.utc)
 
 
@@ -39,11 +41,34 @@ def _observed_forecast() -> dict[str, object]:
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
 
 
-def _entry() -> MockConfigEntry:
+def _schema5_forecast() -> dict[str, object]:
+    """Load the complete current Solar schema-5 DTO fixture."""
+    return json.loads(SCHEMA5_FIXTURE.read_text(encoding="utf-8"))
+
+
+def _maximum_schema5_forecast() -> dict[str, object]:
+    """Expand the complete Solar DTO to a 48-period wire horizon."""
+    payload = _schema5_forecast()
+    source = payload["periods"]
+    assert isinstance(source, list) and source
+    periods: list[dict[str, object]] = []
+    for index in range(48):
+        period = deepcopy(source[index % len(source)])
+        assert isinstance(period, dict)
+        period["period"] = index
+        period["date"] = (
+            NOW + timedelta(minutes=30 * index)
+        ).isoformat().replace("+00:00", "Z")
+        periods.append(period)
+    payload["periods"] = periods
+    return payload
+
+
+def _entry(entry_id: str = "paused-direct-entry") -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="HorizonIQ (Sandbox)",
-        entry_id="paused-direct-entry",
+        entry_id=entry_id,
         version=3,
         data={
             CONF_URL: "https://example.com/api/Forecast_Get?code=test-code",
@@ -132,6 +157,49 @@ async def test_paused_entry_processes_real_coordinator_refresh_without_mqtt(
         assert runtime.virtual_time_utc == time_before
         assert publish.await_count > 0
         assert subscribe.await_count == 7
+        assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_real_schema5_refresh_exposes_complete_entry_local_diagnostics(
+    hass, aioclient_mock
+) -> None:
+    """A config entry keeps the accepted full Solar horizon in live state."""
+    entry = _entry("schema5-live-entry")
+    entry.add_to_hass(hass)
+    request_url = (
+        "https://example.com/api/Forecast_Get?code=test-code"
+        "&currentBatteryCapacity=5000.0&hash=&registrationData="
+    )
+    aioclient_mock.get(request_url, status=429)
+
+    with (
+        patch("custom_components.horizoniq._ensure_local_docs", AsyncMock()),
+        patch("custom_components.horizoniq.sandbox_runtime.mqtt.async_publish", AsyncMock()),
+        patch(
+            "custom_components.horizoniq.sandbox_runtime.mqtt.async_subscribe",
+            AsyncMock(return_value=lambda: None),
+        ),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        runtime = hass.data[DOMAIN][entry.entry_id]
+        runtime._clock = VirtualClock(NOW, ClockRate.PAUSED)
+        runtime._live_forecast_now = lambda: NOW
+
+        aioclient_mock.clear_requests()
+        aioclient_mock.get(request_url, json=_maximum_schema5_forecast())
+        await runtime.coordinator.async_request_refresh()
+        await hass.async_block_till_done()
+
+        state = hass.states.get(_entity_id(hass, entry.entry_id, "forecast_diagnostics"))
+        assert state is not None
+        forecast = state.attributes["forecast"]
+        assert isinstance(forecast, dict)
+        periods = forecast["periods"]
+        assert isinstance(periods, list)
+        assert len(periods) == 48
+        assert periods[0]["decisionTrace"]
         assert await hass.config_entries.async_unload(entry.entry_id)
 
 
