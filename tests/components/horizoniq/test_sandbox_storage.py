@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
@@ -87,6 +87,110 @@ async def test_clean_setup_has_disabled_default_without_store(hass) -> None:
     coordinator.async_pause_for_sandbox.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "stage",
+    (
+        "load",
+        "record_validation",
+        "fault_validation",
+        "profile_restore",
+        "replay_restore",
+        "enable",
+    ),
+)
+async def test_storage_restore_failures_are_staged_sanitized_and_non_destructive(
+    hass, caplog, monkeypatch, stage: str
+) -> None:
+    """Every restore boundary reports only a bounded reason and safe defaults."""
+    source, _ = _runtime(f"storage-stage-{stage}", REGISTRATION_A)
+    await source.async_restore_storage(hass)
+    assert source._storage is not None
+    record = source._storage_record()
+    if stage == "enable":
+        record["simulator_enabled"] = True
+    await source._storage.async_save(record)
+
+    restored, _ = _runtime(f"storage-stage-{stage}", REGISTRATION_A)
+    secret = (
+        '{"registrationId":"11111111-1111-4111-8111-111111111111",'
+        '"gxId":"secret-gx","credentials":"secret-token",'
+        '"profile":"sensitive-profile"}'
+    )
+    save = AsyncMock()
+    monkeypatch.setattr(SandboxStorage, "async_save", save)
+    failure = ValueError(secret)
+    if stage == "load":
+        monkeypatch.setattr(
+            SandboxStorage, "async_load", AsyncMock(side_effect=failure)
+        )
+    elif stage == "record_validation":
+        monkeypatch.setattr(
+            restored, "_validated_storage_record", Mock(side_effect=failure)
+        )
+    elif stage == "fault_validation":
+        monkeypatch.setattr(
+            restored, "_validated_fault_storage", Mock(side_effect=failure)
+        )
+    elif stage == "profile_restore":
+        monkeypatch.setattr(
+            restored, "_async_restore_profile_state", AsyncMock(side_effect=failure)
+        )
+    elif stage == "replay_restore":
+        monkeypatch.setattr(
+            restored, "_async_restore_replay_state", AsyncMock(side_effect=failure)
+        )
+    else:
+        monkeypatch.setattr(restored, "async_enable", AsyncMock(side_effect=failure))
+
+    await restored.async_restore_storage(hass)
+
+    diagnostic = restored.storage_diagnostic
+    assert diagnostic is not None
+    assert f"at {stage} (ValueError)" in diagnostic
+    assert diagnostic.endswith("Details redacted.")
+    assert len(diagnostic) <= 240
+    assert diagnostic in caplog.messages
+    for forbidden in (
+        "registrationId",
+        "11111111-1111-4111-8111-111111111111",
+        "secret-gx",
+        "credentials",
+        "secret-token",
+        "sensitive-profile",
+        "{",
+    ):
+        assert forbidden not in diagnostic
+        assert forbidden not in caplog.text
+    assert restored.simulator_enabled is False
+    assert restored.energy_wh == 5_000
+    assert restored.list_snapshots() == ()
+    save.assert_not_awaited()
+
+
+async def test_storage_restore_keeps_known_sanitized_validation_reason(
+    hass, monkeypatch
+) -> None:
+    """An integration-authored validation error remains useful to the user."""
+    runtime, _ = _runtime("storage-sanitized-reason", REGISTRATION_A)
+    await runtime.async_restore_storage(hass)
+    assert runtime._storage is not None
+    await runtime._storage.async_save(runtime._storage_record())
+
+    restored, _ = _runtime("storage-sanitized-reason", REGISTRATION_A)
+    monkeypatch.setattr(
+        restored,
+        "_validated_storage_record",
+        Mock(side_effect=ValueError("Stored state is not an object")),
+    )
+
+    await restored.async_restore_storage(hass)
+
+    assert restored.storage_diagnostic == (
+        "Storage restore failed at record_validation (ValueError): "
+        "Stored state is not an object"
+    )
+
+
 async def test_save_reload_restore_preserves_state_without_time_jump(hass) -> None:
     """Disabled state restores exactly and does not advance during downtime."""
     runtime, _ = _runtime("storage-reload", REGISTRATION_A)
@@ -104,6 +208,7 @@ async def test_save_reload_restore_preserves_state_without_time_jump(hass) -> No
     assert reloaded.simulator_enabled is False
     assert reloaded.virtual_time_utc == restored_time
     assert reloaded.energy_wh == restored_energy
+    assert reloaded.storage_diagnostic is None
     coordinator.async_pause_for_sandbox.assert_not_awaited()
 
 

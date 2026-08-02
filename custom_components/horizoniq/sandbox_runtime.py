@@ -137,6 +137,55 @@ from .simulation.faults import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_MAX_STORAGE_RESTORE_DIAGNOSTIC_LENGTH = 240
+_SANITIZED_STORAGE_RESTORE_MESSAGES = frozenset(
+    {
+        "Sandbox configuration is unavailable",
+        "Sandbox is unavailable",
+        "Stored command ledger is invalid",
+        "Stored command ledger has duplicate IDs",
+        "Stored command ledger is unordered",
+        "Stored command is invalid",
+        "Stored command timestamp is invalid",
+        "Stored enabled state is invalid",
+        "Stored energy is outside reserve and capacity",
+        "Stored entry identity does not match",
+        "Stored fault snapshots are invalid",
+        "Stored fault state is invalid",
+        "Stored GX identity does not match",
+        "Stored numeric state is invalid",
+        "Stored playback state is invalid",
+        "Stored profile changed; simulator playback is paused.",
+        "Stored profile could not be restored",
+        "Stored profile cursor is invalid; simulator playback is paused.",
+        "Stored profile cursor is invalid",
+        "Stored profile hash is invalid",
+        "Stored profile is unavailable; simulator playback is paused.",
+        "Stored profile selection is invalid",
+        "Stored registration identity does not match",
+        "Stored replay cannot be reconstructed; it was not resumed.",
+        "Stored replay could not be restored",
+        "Stored replay profile identity is invalid",
+        "Stored replay request hash does not match",
+        "Stored replay resume state is invalid",
+        "Stored replay settings are invalid",
+        "Stored replay simulated API failure state is invalid",
+        "Stored replay starting energy is invalid",
+        "Stored replay state is incomplete",
+        "Stored replay state is invalid",
+        "Stored sandbox controls are invalid",
+        "Stored snapshot is invalid",
+        "Stored snapshot limit is invalid",
+        "Stored snapshots are invalid",
+        "Stored state is not an object",
+        "Stored virtual time is invalid",
+        "Unsupported snapshot schema",
+        "Unsupported storage schema",
+        "snapshot clock is naive",
+        "snapshot is invalid",
+        "unsupported snapshot schema",
+    }
+)
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -706,10 +755,14 @@ class HorizonIQEntryRuntime:
             return
         self._storage = SandboxStorage(hass, self.entry_id)
         self._profile_repository = SandboxProfileRepository(hass, self.entry_id)
+        safe_snapshot = self._simulation_snapshot()
+        safe_config = self._config
+        stage = "load"
         try:
             record = await self._storage.async_load()
             if record is None:
                 return
+            stage = "record_validation"
             (
                 snapshot,
                 enabled,
@@ -728,6 +781,7 @@ class HorizonIQEntryRuntime:
                     )
                     for name, snapshot_json in snapshots.items()
                 }
+            stage = "fault_validation"
             faults, fault_snapshots = self._validated_fault_storage(
                 record, expected_snapshot_names=set(snapshots)
             )
@@ -741,22 +795,29 @@ class HorizonIQEntryRuntime:
             self._accepted_command_ids = command_ledger
             self._clear_pending_command()
             self._reset_node_red_status()
+            stage = "profile_restore"
             if not await self._async_restore_profile_state(profile_state):
-                enabled = False
-            await self._async_restore_replay_state(replay_state)
+                raise ValueError(
+                    self.storage_diagnostic or "Stored profile could not be restored"
+                )
+            stage = "replay_restore"
+            if not await self._async_restore_replay_state(replay_state):
+                raise ValueError(
+                    self.storage_diagnostic or "Stored replay could not be restored"
+                )
+            stage = "enable"
             if enabled:
-                await self.async_enable(hass)
+                await self.async_enable(hass, checkpoint_on_failure=False)
             if migrate_corrupted_ledger:
                 self.storage_diagnostic = (
                     "Migrated schema-10 simulator ledgers; cumulative ledgers were reset."
                 )
                 await self.async_checkpoint(immediate=True)
-        except (HomeAssistantError, NotImplementedError, ValueError, TypeError, KeyError):
-            self.storage_diagnostic = (
-                "Stored simulator state is incompatible or invalid; using a disabled default."
-            )
-            self.simulator_enabled = False
-            self._named_snapshots = {}
+        except Exception as err:
+            message = _storage_restore_diagnostic(stage, err)
+            _LOGGER.warning("%s", message)
+            await self._async_restore_safe_default(safe_snapshot, safe_config)
+            self.storage_diagnostic = message
             self._notify_listeners()
 
     async def async_list_profile_filenames(self) -> tuple[str, ...]:
@@ -1022,6 +1083,11 @@ class HorizonIQEntryRuntime:
         self._replay_pending_resume = False
         self._replay_auto_resume_pending = False
         self._prepared_replay_request = None
+        self._direct_replay_payload = None
+        self._last_direct_replay_key = None
+        self._staged_direct_forecast = None
+        self._last_direct_command_id = None
+        self._direct_forecast_health = "unavailable"
         self._playback_state = "stopped"
         self.load_w = 0.0
         self.solar_w = 0.0
@@ -1308,7 +1374,7 @@ class HorizonIQEntryRuntime:
             bool,
             bool,
         ],
-    ) -> None:
+    ) -> bool:
         (
             session,
             starting_energy,
@@ -1319,7 +1385,7 @@ class HorizonIQEntryRuntime:
             simulate_api_failure,
         ) = replay_state
         if session is None:
-            return
+            return True
         try:
             profile, content_hash = await self._async_revalidate_selected_profile()
             if (
@@ -1354,7 +1420,7 @@ class HorizonIQEntryRuntime:
             self._replay_pending_resume = False
             self._replay_auto_resume_pending = False
             self.storage_diagnostic = "Stored replay cannot be reconstructed; it was not resumed."
-            return
+            return False
         self._replay_starting_energy_wh = starting_energy
         self._replay_import_for_export_enabled = import_for_export
         self._replay_export_for_solar_headroom = export_for_solar_headroom
@@ -1367,6 +1433,7 @@ class HorizonIQEntryRuntime:
             self._replay_session = session
             self._replay_pending_resume = False
             self._replay_auto_resume_pending = False
+        return True
 
     async def async_checkpoint(
         self,
@@ -1813,6 +1880,37 @@ class HorizonIQEntryRuntime:
         self.last_command_status = snapshot.command_status
         self.last_command_reason = None
 
+    async def _async_restore_safe_default(
+        self,
+        snapshot: SimulationSnapshot,
+        config: BatteryConfig | None,
+    ) -> None:
+        """Discard partially restored values without persisting over the record."""
+        await self.async_disable(checkpoint=False)
+        self._config = config
+        self._apply_snapshot(snapshot)
+        self.load_w = snapshot.load_w
+        self.solar_w = snapshot.solar_w
+        self.simulator_enabled = False
+        self._named_snapshots = {}
+        self._faults = ()
+        self._named_fault_snapshots = {}
+        self._accepted_command_ids = ()
+        self._clear_pending_command()
+        self._clear_profile_state()
+        self._replay_session = None
+        self._replay_starting_energy_wh = None
+        self._replay_import_for_export_enabled = None
+        self._replay_export_for_solar_headroom = None
+        self._replay_simulate_api_failure = False
+        self._replay_pending_resume = False
+        self._replay_auto_resume_pending = False
+        self._prepared_replay_request = None
+        self._playback_state = "stopped"
+        self._mqtt_emulation_enabled = False
+        self._mqtt_fault_disconnected = False
+        self._cancel_pending_checkpoint()
+        self._reset_node_red_status()
 
     def current_capacity(self) -> str:
         """Return this runtime's capacity in Wh for the forecast request."""
@@ -1830,7 +1928,12 @@ class HorizonIQEntryRuntime:
 
         return remove_listener
 
-    async def async_enable(self, hass: HomeAssistant) -> None:
+    async def async_enable(
+        self,
+        hass: HomeAssistant,
+        *,
+        checkpoint_on_failure: bool = True,
+    ) -> None:
         """Start direct HA control and the entry-local virtual clock."""
         if self._unloaded:
             raise RuntimeError("Sandbox runtime has been unloaded")
@@ -1876,7 +1979,7 @@ class HorizonIQEntryRuntime:
             else:
                 self._task = hass.async_create_task(self._async_loop(hass))
         except Exception:
-            await self.async_disable()
+            await self.async_disable(checkpoint=checkpoint_on_failure)
             raise
         await self._async_publish_telemetry_snapshot()
         await self._async_publish_runtime_statuses(force=True)
@@ -3314,6 +3417,17 @@ def _snapshot_name(value: object) -> str:
     if _SNAPSHOT_NAME_PATTERN.fullmatch(normalized) is None:
         raise ValueError("Snapshot name is invalid")
     return normalized
+
+
+def _storage_restore_diagnostic(stage: str, error: Exception) -> str:
+    """Return a bounded restore error without admitting stored-data content."""
+    detail = str(error).strip()
+    if detail not in _SANITIZED_STORAGE_RESTORE_MESSAGES:
+        detail = "Details redacted."
+    diagnostic = (
+        f"Storage restore failed at {stage} ({type(error).__name__}): {detail}"
+    )
+    return diagnostic[:_MAX_STORAGE_RESTORE_DIAGNOSTIC_LENGTH]
 
 
 def _fault_status_item(fault: Fault) -> FaultStatusItem:
