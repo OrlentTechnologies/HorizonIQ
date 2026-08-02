@@ -87,6 +87,30 @@ set_virtual_battery_state_of_charge:
           step: 1
           unit_of_measurement: "%"
           mode: slider
+set_virtual_battery_external_power:
+  name: Set virtual battery external power
+  description: Apply a bounded local external controller instruction to one active Virtual-mode Sandbox with Charging source set to External controller.
+  fields:
+    entry_id:
+      required: true
+      selector:
+        text:
+    power_w:
+      required: true
+      selector:
+        number:
+          min: -100000
+          max: 100000
+          unit_of_measurement: W
+          mode: box
+    valid_for_seconds:
+      required: false
+      default: 60
+      selector:
+        number:
+          min: 1
+          max: 300
+          mode: box
 snapshot_create:
   name: Create sandbox snapshot
   fields:

@@ -89,7 +89,10 @@ class SandboxProfilePlaybackSwitch(SwitchEntity):
 
     @property
     def available(self) -> bool:
-        return self._runtime.virtual_entity_available
+        return (
+            self._runtime.virtual_entity_available
+            and self._runtime.operating_mode == "replay"
+        )
 
     @property
     def is_on(self) -> bool:

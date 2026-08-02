@@ -128,7 +128,6 @@ async def test_paused_entry_processes_real_coordinator_refresh_without_mqtt(
         runtime._clock = VirtualClock(NOW - timedelta(days=1), ClockRate.PAUSED)
         runtime._live_forecast_now = lambda: NOW
         energy_before = runtime.energy_wh
-        time_before = runtime.virtual_time_utc
 
         aioclient_mock.clear_requests()
         aioclient_mock.get(request_url, status=429)
@@ -154,7 +153,7 @@ async def test_paused_entry_processes_real_coordinator_refresh_without_mqtt(
         assert hass.states.get(command).state == "No action"
         assert "self-consumption" in hass.states.get(decision).state
         assert runtime.energy_wh == energy_before
-        assert runtime.virtual_time_utc == time_before
+        assert runtime.virtual_time_utc == NOW
         assert publish.await_count > 0
         assert subscribe.await_count == 7
         assert await hass.config_entries.async_unload(entry.entry_id)

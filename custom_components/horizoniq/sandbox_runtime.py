@@ -209,6 +209,10 @@ MAX_BATTERY_ENERGY_WH = 2_000_000.0
 MAX_ABSOLUTE_POWER_W = 100_000.0
 _MAX_ENERGY_WH = MAX_BATTERY_ENERGY_WH
 _MAX_POWER_W = MAX_ABSOLUTE_POWER_W
+_OPERATING_MODES = frozenset({"virtual", "replay"})
+_CHARGING_SOURCES = frozenset({"virtual_battery", "external"})
+_DEFAULT_EXTERNAL_POWER_VALIDITY_SECONDS = 60
+_MAX_EXTERNAL_POWER_VALIDITY_SECONDS = 300
 
 
 @dataclass(slots=True)
@@ -433,6 +437,11 @@ class HorizonIQEntryRuntime:
     _node_red_status: RuntimeStatus | None = None
     _last_battery_power_w: float = 0.0
     _selected_fault_kind: FaultKind = FaultKind.STALE_TELEMETRY
+    _operating_mode: str = "virtual"
+    _charging_source: str = "virtual_battery"
+    _external_power_w: float | None = None
+    _external_power_expires_at_utc: datetime | None = None
+    _external_power_expiry_handle: asyncio.TimerHandle | None = None
 
     @property
     def is_sandbox_configured(self) -> bool:
@@ -563,6 +572,32 @@ class HorizonIQEntryRuntime:
     def clock_rate(self) -> str | None:
         """Return the current virtual-clock rate."""
         return self._clock.state.rate if self._clock is not None else None
+
+    @property
+    def operating_mode(self) -> str:
+        """Return this Sandbox entry's persisted operating mode."""
+        return self._operating_mode
+
+    @property
+    def charging_source(self) -> str:
+        """Return the single local source allowed to control charging."""
+        return self._charging_source
+
+    @property
+    def external_power_w(self) -> float | None:
+        """Return a live external instruction without persisting it."""
+        if self._external_power_is_current():
+            return self._external_power_w
+        return None
+
+    @property
+    def active_setpoint_w(self) -> float | None:
+        """Return the one current source-owned power instruction."""
+        if self._charging_source == "external":
+            return self.external_power_w
+        if self._command is not None and self._command.mode is OperatingMode.GRID_SETPOINT:
+            return self._command.requested_grid_power_w
+        return None
 
     @property
     def selected_profile_filename(self) -> str | None:
@@ -745,9 +780,140 @@ class HorizonIQEntryRuntime:
         self._profile_cursor = None
         self._accepted_command_ids = ()
         self._clear_pending_command()
+        self._operating_mode = "virtual"
+        self._charging_source = "virtual_battery"
+        self._clear_external_power()
         self.coordinator.set_battery_capacity_provider(self.current_capacity)
         self.available_reason = None
         self._notify_listeners()
+
+    async def async_select_operating_mode(self, mode: str) -> None:
+        """Switch one sandbox between wall-clock Virtual and deterministic Replay."""
+        if mode not in _OPERATING_MODES:
+            raise ValueError("Sandbox operating mode is invalid")
+        if mode == self._operating_mode:
+            return
+        self._operating_mode = mode
+        self._cancel_active_control()
+        if mode == "replay":
+            # External instructions are meaningful only while Virtual mode
+            # owns the wall-clock physics loop.
+            self._charging_source = "virtual_battery"
+        if self._clock is not None:
+            if mode == "virtual":
+                self._clock.reset(self._live_forecast_now())
+                self._clock.set_rate(ClockRate.X1)
+            else:
+                self._clock.set_rate(ClockRate.PAUSED)
+        self._playback_state = "stopped"
+        await self.async_checkpoint(immediate=True)
+        self._notify_listeners()
+
+    async def async_select_charging_source(self, source: str) -> None:
+        """Select the sole local owner allowed to supply virtual battery power."""
+        if source not in _CHARGING_SOURCES:
+            raise ValueError("Sandbox charging source is invalid")
+        if source == self._charging_source:
+            return
+        self._charging_source = source
+        self._cancel_active_control()
+        if source == "external":
+            self.last_command_status = CommandStatus.NO_ACTION
+            self.last_command_reason = "Awaiting external controller"
+        await self.async_checkpoint(immediate=True)
+        self._notify_listeners()
+
+    async def async_set_external_power(
+        self,
+        power_w: float,
+        valid_for_seconds: int = _DEFAULT_EXTERNAL_POWER_VALIDITY_SECONDS,
+    ) -> None:
+        """Apply one bounded local external instruction through normal physics."""
+        if (
+            not self.simulator_enabled
+            or self._operating_mode != "virtual"
+            or self._charging_source != "external"
+            or self._config is None
+        ):
+            raise ValueError("External power requires an active Virtual-mode external sandbox")
+        if isinstance(power_w, bool) or not math.isfinite(power_w):
+            raise ValueError("External power must be finite")
+        if isinstance(valid_for_seconds, bool) or not (
+            1 <= valid_for_seconds <= _MAX_EXTERNAL_POWER_VALIDITY_SECONDS
+        ):
+            raise ValueError("External power validity must be between 1 and 300 seconds")
+        self._external_power_w = min(
+            self._config.max_charge_power_w,
+            max(-self._config.max_discharge_power_w, power_w),
+        )
+        self._external_power_expires_at_utc = self._live_forecast_now() + timedelta(
+            seconds=valid_for_seconds
+        )
+        self._schedule_external_power_expiry(valid_for_seconds)
+        self.last_command_status = (
+            CommandStatus.APPLIED if self._external_power_w else CommandStatus.NO_ACTION
+        )
+        self.last_command_reason = "External controller"
+        self._notify_listeners()
+
+    def _external_power_is_current(self) -> bool:
+        return (
+            self._external_power_w is not None
+            and self._external_power_expires_at_utc is not None
+            and self._live_forecast_now() < self._external_power_expires_at_utc
+        )
+
+    def _schedule_external_power_expiry(self, valid_for_seconds: int) -> None:
+        self._clear_external_power_handle()
+        if self._hass is not None:
+            self._external_power_expiry_handle = self._hass.loop.call_later(
+                valid_for_seconds,
+                self._external_power_expired,
+            )
+
+    def _external_power_expired(self) -> None:
+        self._external_power_expiry_handle = None
+        if not self._external_power_is_current():
+            self._clear_external_power()
+            if self._charging_source == "external":
+                self.last_command_status = CommandStatus.NO_ACTION
+                self.last_command_reason = "Awaiting external controller"
+            self._notify_listeners()
+
+    def _clear_external_power_handle(self) -> None:
+        if self._external_power_expiry_handle is not None:
+            self._external_power_expiry_handle.cancel()
+            self._external_power_expiry_handle = None
+
+    def _clear_external_power(self) -> None:
+        self._clear_external_power_handle()
+        self._external_power_w = None
+        self._external_power_expires_at_utc = None
+
+    def _cancel_active_control(self) -> None:
+        self._clear_external_power()
+        self._command = Command(OperatingMode.SELF_CONSUMPTION)
+        self._last_direct_command_id = None
+        self.last_command_status = CommandStatus.NO_ACTION
+        self.last_command_reason = "No executable action; self-consumption applied."
+
+    def _validated_operating_configuration(
+        self, record_value: object
+    ) -> tuple[str, str]:
+        """Migrate pre-mode stores to safe Virtual built-in control defaults."""
+        record = record_mapping(record_value)
+        if record is None:
+            raise ValueError("Stored state is not an object")
+        if record.get("storage_schema_version") != STORAGE_SCHEMA_VERSION:
+            # Before schema 12 every sandbox used the deterministic virtual
+            # clock. Restore those valid records as Replay to preserve their
+            # original timing and playback semantics.
+            return "replay", "virtual_battery"
+        mode = record.get("operating_mode")
+        source = record.get("charging_source")
+        if mode not in _OPERATING_MODES or source not in _CHARGING_SOURCES:
+            raise ValueError("Stored operating mode or charging source is invalid")
+        return mode, source
 
     async def async_restore_storage(self, hass: HomeAssistant) -> None:
         """Restore only this entry's validated state, without inferring identity."""
@@ -772,6 +938,9 @@ class HorizonIQEntryRuntime:
                 command_ledger,
                 control_config,
             ) = self._validated_storage_record(record)
+            operating_mode, charging_source = self._validated_operating_configuration(
+                record
+            )
             migrate_corrupted_ledger = _requires_ledger_migration(record)
             if migrate_corrupted_ledger:
                 snapshot = _snapshot_without_corrupted_ledger(snapshot)
@@ -786,6 +955,8 @@ class HorizonIQEntryRuntime:
                 record, expected_snapshot_names=set(snapshots)
             )
             self._config = control_config
+            self._operating_mode = operating_mode
+            self._charging_source = charging_source
             self._apply_snapshot(snapshot)
             self.load_w = snapshot.load_w
             self.solar_w = snapshot.solar_w
@@ -795,6 +966,10 @@ class HorizonIQEntryRuntime:
             self._accepted_command_ids = command_ledger
             self._clear_pending_command()
             self._reset_node_red_status()
+            if operating_mode == "virtual" and (
+                profile_state[0] is not None or replay_state[0] is not None
+            ):
+                raise ValueError("Stored Replay state is incompatible with Virtual mode")
             stage = "profile_restore"
             if not await self._async_restore_profile_state(profile_state):
                 raise ValueError(
@@ -1571,6 +1746,8 @@ class HorizonIQEntryRuntime:
                 if enabled_override is None
                 else enabled_override
             ),
+            "operating_mode": self._operating_mode,
+            "charging_source": self._charging_source,
             "current_snapshot": to_json(self._simulation_snapshot()),
             "snapshots": dict(self._named_snapshots),
             "selected_profile_filename": self._selected_profile_filename,
@@ -1605,7 +1782,7 @@ class HorizonIQEntryRuntime:
         record = record_mapping(record_value)
         if record is None:
             raise ValueError("Stored fault state is invalid")
-        if record.get("storage_schema_version") not in {5, 6, 7, 8, 9, 10, STORAGE_SCHEMA_VERSION}:
+        if record.get("storage_schema_version") not in {5, 6, 7, 8, 9, 10, 11, STORAGE_SCHEMA_VERSION}:
             return (), {}
         faults = validate_faults(record.get("faults"))
         raw_snapshots = record.get("fault_snapshots")
@@ -1633,7 +1810,7 @@ class HorizonIQEntryRuntime:
         if record is None:
             raise ValueError("Stored state is not an object")
         storage_schema = record.get("storage_schema_version")
-        if storage_schema not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, STORAGE_SCHEMA_VERSION}:
+        if storage_schema not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, STORAGE_SCHEMA_VERSION}:
             raise ValueError("Unsupported storage schema")
         if record.get("snapshot_schema_version") not in {1, 2, 3, SNAPSHOT_SCHEMA_VERSION}:
             raise ValueError("Unsupported snapshot schema")
@@ -1651,7 +1828,7 @@ class HorizonIQEntryRuntime:
         control_config = self._config
         if control_config is None:
             raise ValueError("Sandbox configuration is unavailable")
-        if storage_schema in {8, 9, 10, STORAGE_SCHEMA_VERSION}:
+        if storage_schema in {8, 9, 10, 11, STORAGE_SCHEMA_VERSION}:
             control_config = _control_config_from_storage(
                 record.get("control_config"),
                 fallback=control_config,
@@ -1669,7 +1846,7 @@ class HorizonIQEntryRuntime:
             self._validated_snapshot(from_json(snapshot_json), config=control_config)
             snapshots[normalized] = snapshot_json
         profile_state: tuple[str | None, str | None, str] = (None, None, "stopped")
-        if storage_schema in {2, 3, 4, 5, 6, 7, 8, 9, 10, STORAGE_SCHEMA_VERSION}:
+        if storage_schema in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, STORAGE_SCHEMA_VERSION}:
             filename = record.get("selected_profile_filename")
             profile_hash = record.get("profile_hash")
             playback_state = record.get("playback_state")
@@ -1693,7 +1870,7 @@ class HorizonIQEntryRuntime:
             False,
             False,
         )
-        if storage_schema in {3, 4, 5, 6, 7, 8, 9, 10, STORAGE_SCHEMA_VERSION}:
+        if storage_schema in {3, 4, 5, 6, 7, 8, 9, 10, 11, STORAGE_SCHEMA_VERSION}:
             session_value = record.get("replay_session")
             starting_energy = record.get("replay_starting_energy_wh")
             import_for_export = record.get("replay_import_for_export_enabled")
@@ -1701,12 +1878,12 @@ class HorizonIQEntryRuntime:
             pending_resume = record.get("replay_pending_resume")
             auto_resume = (
                 record.get("replay_auto_resume_pending")
-                if storage_schema in {4, 5, 6, 7, 8, 9, 10, STORAGE_SCHEMA_VERSION}
+                if storage_schema in {4, 5, 6, 7, 8, 9, 10, 11, STORAGE_SCHEMA_VERSION}
                 else None
             )
             simulate_api_failure = (
                 record.get("replay_simulate_api_failure")
-                if storage_schema in {8, 9, 10, STORAGE_SCHEMA_VERSION}
+                if storage_schema in {8, 9, 10, 11, STORAGE_SCHEMA_VERSION}
                 else False
             )
             if session_value is None:
@@ -1718,7 +1895,7 @@ class HorizonIQEntryRuntime:
                         export_for_solar_headroom,
                     )
                 ) or pending_resume is not False or (
-                    storage_schema in {4, 5, 6, 7, 8, 9, 10, STORAGE_SCHEMA_VERSION} and auto_resume is not False
+                    storage_schema in {4, 5, 6, 7, 8, 9, 10, 11, STORAGE_SCHEMA_VERSION} and auto_resume is not False
                 ) or simulate_api_failure is not False:
                     raise ValueError("Stored replay state is invalid")
             else:
@@ -1737,7 +1914,7 @@ class HorizonIQEntryRuntime:
                     export_for_solar_headroom, bool
                 ) or not isinstance(pending_resume, bool):
                     raise ValueError("Stored replay settings are invalid")
-                if storage_schema in {4, 5, 6, 7, 8, 9, 10, STORAGE_SCHEMA_VERSION} and not isinstance(auto_resume, bool):
+                if storage_schema in {4, 5, 6, 7, 8, 9, 10, 11, STORAGE_SCHEMA_VERSION} and not isinstance(auto_resume, bool):
                     raise ValueError("Stored replay resume state is invalid")
                 if not isinstance(simulate_api_failure, bool):
                     raise ValueError("Stored replay simulated API failure state is invalid")
@@ -1751,7 +1928,7 @@ class HorizonIQEntryRuntime:
                     pending_resume,
                     (
                         auto_resume
-                        if storage_schema in {4, 5, 6, 7, 8, 9, 10, STORAGE_SCHEMA_VERSION}
+                        if storage_schema in {4, 5, 6, 7, 8, 9, 10, 11, STORAGE_SCHEMA_VERSION}
                         else session.state in _REPLAY_ACTIVE_STATES or pending_resume
                     ),
                     simulate_api_failure,
@@ -1762,7 +1939,7 @@ class HorizonIQEntryRuntime:
                 record.get("accepted_command_ids"),
                 snapshot.clock_state.virtual_time_utc,
             )
-            if storage_schema in {6, 7, 8, 9, 10, STORAGE_SCHEMA_VERSION}
+            if storage_schema in {6, 7, 8, 9, 10, 11, STORAGE_SCHEMA_VERSION}
             else ()
         )
         return (
@@ -1909,6 +2086,9 @@ class HorizonIQEntryRuntime:
         self._playback_state = "stopped"
         self._mqtt_emulation_enabled = False
         self._mqtt_fault_disconnected = False
+        self._operating_mode = "virtual"
+        self._charging_source = "virtual_battery"
+        self._clear_external_power()
         self._cancel_pending_checkpoint()
         self._reset_node_red_status()
 
@@ -1945,6 +2125,12 @@ class HorizonIQEntryRuntime:
         self.simulator_enabled = True
         self._hass = hass
         try:
+            if self._operating_mode == "virtual" and self._clock is not None:
+                # Virtual commands and physics both use real UTC. This prevents
+                # a paused replay clock from making a current command forever
+                # "not yet valid" after a mode switch or restart.
+                self._clock.reset(self._live_forecast_now())
+                self._clock.set_rate(ClockRate.X1)
             await self.coordinator.async_pause_for_sandbox()
             self._coordinator_paused = True
             self._subscribe_to_coordinator_forecasts()
@@ -2006,6 +2192,7 @@ class HorizonIQEntryRuntime:
             )
         self._cancel_replay_timeout()
         self._cancel_replay_heartbeat()
+        self._clear_external_power()
         self._freeze_fault_durations()
         self._cancel_all_fault_work()
         self._mqtt_fault_disconnected = False
@@ -2049,6 +2236,8 @@ class HorizonIQEntryRuntime:
             raise RuntimeError("Sandbox runtime has been unloaded")
         if self._clock is None:
             raise ValueError("Sandbox is unavailable")
+        if self._operating_mode != "replay":
+            raise ValueError("Clock controls are available only in Replay mode")
         self._clock.set_rate(rate)
         self._schedule_immediate_checkpoint()
         self._notify_listeners()
@@ -2373,11 +2562,28 @@ class HorizonIQEntryRuntime:
     ) -> None:
         if self._config is None or self._state is None:
             return
+        command = self._command
+        if self._operating_mode == "virtual" and self._charging_source == "external":
+            if self._external_power_is_current() and self._external_power_w is not None:
+                # The physics model accepts a grid setpoint. Offset the requested
+                # grid power so the requested external value is battery AC power
+                # after local load and solar are accounted for.
+                command = Command(
+                    OperatingMode.GRID_SETPOINT,
+                    load_w - solar_w + self._external_power_w,
+                    self._live_forecast_now(),
+                    self._external_power_expires_at_utc,
+                )
+            else:
+                self._clear_external_power()
+                command = Command(OperatingMode.SELF_CONSUMPTION)
+                self.last_command_status = CommandStatus.NO_ACTION
+                self.last_command_reason = "Awaiting external controller"
         result = simulate_step(
             previous=self._state,
             elapsed_seconds=elapsed_seconds,
             virtual_time_utc=virtual_time_utc,
-            command=self._command,
+            command=command,
             load_w=load_w,
             solar_w=solar_w,
             config=self._config,
@@ -2385,7 +2591,18 @@ class HorizonIQEntryRuntime:
         self._state = result.state
         self._last_grid_power_w = result.actual_grid_power_w
         self._last_battery_power_w = result.battery_ac_power_w
-        if (
+        if self._operating_mode == "virtual" and self._charging_source == "external":
+            self.last_command_status = (
+                CommandStatus.APPLIED
+                if self._external_power_is_current()
+                else CommandStatus.NO_ACTION
+            )
+            self.last_command_reason = (
+                "External controller"
+                if self._external_power_is_current()
+                else "Awaiting external controller"
+            )
+        elif (
             self._direct_forecast_health == "healthy"
             and self._last_direct_command_id is None
             and self._command is not None
@@ -2405,7 +2622,12 @@ class HorizonIQEntryRuntime:
 
     async def _async_refresh_direct_forecast(self) -> None:
         """Fetch and apply one validated Forecast_Get action without MQTT authority."""
-        if not self.simulator_enabled or self._config is None or self._clock is None:
+        if (
+            not self.simulator_enabled
+            or self._operating_mode != "virtual"
+            or self._config is None
+            or self._clock is None
+        ):
             return
         try:
             forecast = await self.coordinator.async_fetch_sandbox_forecast()
@@ -2437,7 +2659,12 @@ class HorizonIQEntryRuntime:
 
     async def _async_stage_direct_forecast(self, forecast: Forecast | None) -> None:
         """Validate and apply a coordinator forecast independently of physics time."""
-        if not self.simulator_enabled or self._config is None or self._clock is None:
+        if (
+            not self.simulator_enabled
+            or self._operating_mode != "virtual"
+            or self._config is None
+            or self._clock is None
+        ):
             return
         async with self._direct_forecast_lock:
             if forecast is None:
@@ -2472,6 +2699,15 @@ class HorizonIQEntryRuntime:
                 direct = validation.command
                 assert direct is not None
                 self._staged_direct_forecast = forecast
+                if self._charging_source == "external":
+                    self._command = Command(OperatingMode.SELF_CONSUMPTION)
+                    self._last_direct_command_id = None
+                    self.last_command_status = CommandStatus.NO_ACTION
+                    self.last_command_reason = "Awaiting external controller"
+                    self._direct_forecast_health = "healthy"
+                    await self.async_checkpoint(immediate=True)
+                    self._notify_listeners()
+                    return
                 if direct.command_id is None:
                     self._command = direct.command
                     self._last_direct_command_id = None

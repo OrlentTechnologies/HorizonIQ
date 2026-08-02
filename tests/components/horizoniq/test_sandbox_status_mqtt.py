@@ -108,7 +108,7 @@ async def test_exact_schema_two_payloads_triggers_and_semantic_coalescing(hass) 
             "schemaVersion": 2,
             "gxDeviceId": runtime.pretend_gx_id,
             "timestampUtc": simulator["timestampUtc"],
-            "state": "paused",
+            "state": "running",
             "reason": None,
             "virtualTimeUtc": simulator["timestampUtc"],
             "playbackState": "none",

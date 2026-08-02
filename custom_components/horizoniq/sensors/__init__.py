@@ -193,6 +193,15 @@ class SandboxRuntimeSensor(SensorEntity):
         return {
             "gx_id": self._runtime.pretend_gx_id,
             "clock_rate": self._runtime.clock_rate,
+            "operating_mode": self._runtime.operating_mode,
+            "charging_source": self._runtime.charging_source,
+            "active_setpoint_w": _rounded_number(self._runtime.active_setpoint_w),
+            "active_action": self._runtime.last_command_reason,
+            "rejection_reason": (
+                self._runtime.last_command_reason
+                if self._runtime.last_command_status.value.startswith("fallback")
+                else None
+            ),
             "capacity_wh": _rounded_number(self._runtime.capacity_wh),
             "reserve_wh": _rounded_number(self._runtime.reserve_wh),
             "command_reason": _friendly_state(self._runtime.last_command_reason),

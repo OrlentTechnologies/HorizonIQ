@@ -111,6 +111,10 @@ class SandboxStepButton(_SandboxButton):
     def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str) -> None:
         super().__init__(runtime, entry_id, "simulation_step")
 
+    @property
+    def available(self) -> bool:
+        return super().available and self._runtime.operating_mode == "replay"
+
     async def async_press(self) -> None:
         """Apply the next virtual half hour."""
         await self._runtime.async_step()
@@ -136,6 +140,10 @@ class SandboxResetProfileButton(_SandboxButton):
 
     def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str) -> None:
         super().__init__(runtime, entry_id, "profile_reset")
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._runtime.operating_mode == "replay"
 
     async def async_press(self) -> None:
         await self._runtime.async_reset_playback()

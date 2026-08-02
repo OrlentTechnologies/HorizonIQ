@@ -159,6 +159,60 @@ async def test_failed_mqtt_setup_cleans_up_only_its_runtime(hass) -> None:
     coordinator.async_resume_from_sandbox.assert_awaited_once()
 
 
+async def test_virtual_mode_external_power_uses_physics_and_expires(hass) -> None:
+    """External control is entry-local, bounded, and never changes SoC directly."""
+    runtime, _ = _runtime()
+    runtime._live_forecast_now = lambda: runtime.virtual_time_utc
+    with patch(
+        "custom_components.horizoniq.sandbox_runtime.mqtt.async_subscribe",
+        new=AsyncMock(return_value=lambda: None),
+    ):
+        await runtime.async_enable(hass)
+    assert runtime.operating_mode == "virtual"
+    assert runtime.charging_source == "virtual_battery"
+    assert runtime.clock_rate == "1x"
+
+    await runtime.async_select_charging_source("external")
+    before = runtime.energy_wh
+    await runtime.async_set_external_power(1_000, 60)
+    await runtime._async_simulate_segment(
+        60,
+        runtime.virtual_time_utc,
+        0,
+        0,
+        hass=hass,
+    )
+    assert runtime.energy_wh is not None and before is not None
+    assert runtime.energy_wh > before
+    assert runtime.external_power_w == 1_000
+
+    await runtime.async_select_charging_source("virtual_battery")
+    assert runtime.external_power_w is None
+    assert runtime.last_command_status is CommandStatus.NO_ACTION
+    await runtime.async_disable()
+
+
+async def test_external_power_rejects_wrong_mode_source_and_duration(hass) -> None:
+    """Only an active Virtual-mode external entry can accept a bounded command."""
+    runtime, _ = _runtime()
+    with pytest.raises(ValueError):
+        await runtime.async_set_external_power(1_000)
+    with patch(
+        "custom_components.horizoniq.sandbox_runtime.mqtt.async_subscribe",
+        new=AsyncMock(return_value=lambda: None),
+    ):
+        await runtime.async_enable(hass)
+    with pytest.raises(ValueError):
+        await runtime.async_set_external_power(1_000)
+    await runtime.async_select_charging_source("external")
+    with pytest.raises(ValueError):
+        await runtime.async_set_external_power(1_000, 301)
+    await runtime.async_select_operating_mode("replay")
+    with pytest.raises(ValueError):
+        await runtime.async_set_external_power(1_000)
+    await runtime.async_disable()
+
+
 async def test_mqtt_setup_is_coordinator_ordered_and_entry_local(hass) -> None:
     """One unavailable MQTT setup leaves only its local transport disabled."""
     failed, failed_coordinator = _runtime()

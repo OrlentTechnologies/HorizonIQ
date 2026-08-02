@@ -101,6 +101,7 @@ def _profile() -> str:
 
 async def _select_profile(hass, runtime: HorizonIQEntryRuntime, content: str | None = None) -> None:
     await runtime.async_restore_storage(hass)
+    await runtime.async_select_operating_mode("replay")
     directory = Path(hass.config.path("horizoniq", "profiles", runtime.entry_id))
     await hass.async_add_executor_job(lambda: directory.mkdir(parents=True, exist_ok=True))
     await hass.async_add_executor_job((directory / "day.json").write_text, content or _profile(), "utf-8")
@@ -624,7 +625,8 @@ async def test_schema_two_migrates_and_restart_reconstructs_with_one_publication
         "utf-8",
     )
     await changed.async_restore_storage(hass)
-    assert changed.replay_state is ReplayState.FAILED
+    assert changed.replay_state is None
+    assert changed.simulator_enabled is False
     assert changed.storage_diagnostic is not None
 
 

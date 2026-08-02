@@ -33,6 +33,8 @@ async def async_setup_entry(
                 SandboxProfileSelect(runtime, config_entry.entry_id),
                 SandboxScenarioSelect(runtime, config_entry.entry_id),
                 SandboxEquipmentProfileSelect(runtime, config_entry.entry_id),
+                SandboxOperatingModeSelect(runtime, config_entry.entry_id),
+                SandboxChargingSourceSelect(runtime, config_entry.entry_id),
                 SandboxFaultKindSelect(runtime, config_entry.entry_id),
             ]
         )
@@ -80,6 +82,10 @@ class SandboxClockRateSelect(_SandboxSelect):
         """Return this sandbox's selected virtual-clock rate."""
         return self._runtime.clock_rate
 
+    @property
+    def available(self) -> bool:
+        return super().available and self._runtime.operating_mode == "replay"
+
     async def async_select_option(self, option: str) -> None:
         """Change only this sandbox's virtual-clock rate."""
         self._runtime.set_clock_rate(ClockRate(option))
@@ -100,6 +106,11 @@ class SandboxProfileSelect(_SandboxSelect):
     @property
     def current_option(self) -> str | None:
         return self._runtime.selected_profile_filename or self._not_selected
+
+    @property
+    def available(self) -> bool:
+        """Profiles are a deterministic Replay-mode control."""
+        return super().available and self._runtime.operating_mode == "replay"
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -152,6 +163,52 @@ class SandboxEquipmentProfileSelect(_SandboxSelect):
     async def async_select_option(self, option: str) -> None:
         if option != self._runtime.equipment_profile_name:
             raise ValueError("Only the registration-owned equipment profile is available")
+
+
+class SandboxOperatingModeSelect(_SandboxSelect):
+    """Choose the only sandbox modes; Live equipment control is never an option."""
+
+    _attr_name = "Operating mode"
+    _attr_options = ["virtual", "replay"]
+
+    def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str) -> None:
+        super().__init__(runtime, entry_id, "operating_mode")
+
+    @property
+    def current_option(self) -> str:
+        return self._runtime.operating_mode
+
+    async def async_select_option(self, option: str) -> None:
+        await self._runtime.async_select_operating_mode(option)
+
+
+class SandboxChargingSourceSelect(_SandboxSelect):
+    """Select the sole local authority allowed to apply battery power."""
+
+    _attr_name = "Charging source"
+    _attr_options = ["Virtual battery", "External controller"]
+    _options = {
+        "Virtual battery": "virtual_battery",
+        "External controller": "external",
+    }
+
+    def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str) -> None:
+        super().__init__(runtime, entry_id, "charging_source")
+
+    @property
+    def current_option(self) -> str:
+        return next(
+            label
+            for label, value in self._options.items()
+            if value == self._runtime.charging_source
+        )
+
+    async def async_select_option(self, option: str) -> None:
+        try:
+            source = self._options[option]
+        except KeyError as err:
+            raise ValueError("Charging source is invalid") from err
+        await self._runtime.async_select_charging_source(source)
 
 
 def _friendly_option(value: str) -> str:

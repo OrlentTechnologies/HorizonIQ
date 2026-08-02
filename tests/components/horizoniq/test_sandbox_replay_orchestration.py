@@ -71,6 +71,7 @@ def _profile(samples: int = 12) -> str:
 
 async def _prepared(hass, runtime: HorizonIQEntryRuntime, *, samples: int = 12) -> None:
     await runtime.async_restore_storage(hass)
+    await runtime.async_select_operating_mode("replay")
     directory = Path(hass.config.path("horizoniq", "profiles", runtime.entry_id))
     await hass.async_add_executor_job(lambda: directory.mkdir(parents=True, exist_ok=True))
     await hass.async_add_executor_job((directory / "day.json").write_text, _profile(samples), "utf-8")

@@ -99,6 +99,8 @@ def _assert_virtual_entities_are_available(hass, entry_id: str) -> None:
             "profile",
             "scenario",
             "equipment_profile",
+            "operating_mode",
+            "charging_source",
             "fault_kind",
         ),
         "button": (
@@ -110,10 +112,20 @@ def _assert_virtual_entities_are_available(hass, entry_id: str) -> None:
             "fault_clear",
         ),
     }
+    replay_only = {
+        ("switch", "profile_playback"),
+        ("select", "clock_rate"),
+        ("select", "profile"),
+        ("button", "simulation_step"),
+        ("button", "profile_reset"),
+    }
     for domain, suffixes in entity_suffixes.items():
         for suffix in suffixes:
             entity_id = _entity_id(hass, domain, entry_id, suffix)
-            assert hass.states.get(entity_id).state != STATE_UNAVAILABLE
+            if (domain, suffix) in replay_only:
+                assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
+            else:
+                assert hass.states.get(entity_id).state != STATE_UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -190,7 +202,7 @@ async def test_service_and_number_update_paused_virtual_battery_entities(hass) -
         energy = _entity_id(hass, "sensor", entry.entry_id, "energy")
 
         await hass.services.async_call("switch", "turn_on", {"entity_id": switch}, blocking=True)
-        assert runtime.clock_rate == ClockRate.PAUSED.value
+        assert runtime.clock_rate == ClockRate.X1.value
         time_before = runtime.virtual_time_utc
         number_state = hass.states.get(number)
         assert number_state.attributes["mode"] == "box"

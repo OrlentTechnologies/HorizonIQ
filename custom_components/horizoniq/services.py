@@ -35,6 +35,28 @@ def _finite_percentage(value: object) -> float:
     return percentage
 
 
+def _finite_power(value: object) -> float:
+    """Reject boolean and non-finite external power requests."""
+    if isinstance(value, bool):
+        raise vol.Invalid("power_w must be finite")
+    try:
+        power = float(value)
+    except (TypeError, ValueError) as err:
+        raise vol.Invalid("power_w must be finite") from err
+    if not math.isfinite(power):
+        raise vol.Invalid("power_w must be finite")
+    return power
+
+
+def _external_power_duration(value: object) -> int:
+    """Require an actual bounded integer; fractional validity is ambiguous."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise vol.Invalid("valid_for_seconds must be an integer between 1 and 300")
+    if not 1 <= value <= 300:
+        raise vol.Invalid("valid_for_seconds must be an integer between 1 and 300")
+    return value
+
+
 def _runtime(hass: HomeAssistant, entry_id: str) -> HorizonIQEntryRuntime:
     runtime = hass.data.get(DOMAIN, {}).get(entry_id)
     if not isinstance(runtime, HorizonIQEntryRuntime) or not runtime.is_sandbox_configured:
@@ -54,28 +76,40 @@ def _diagnostics_runtime(hass: HomeAssistant, entry_id: str) -> HorizonIQEntryRu
     return runtime
 
 
+def _replay_runtime(hass: HomeAssistant, entry_id: str) -> HorizonIQEntryRuntime:
+    """Return an active sandbox only when its user-selected mode is Replay."""
+    runtime = _runtime(hass, entry_id)
+    if runtime.operating_mode != "replay":
+        raise HomeAssistantError("This service is available only in Replay mode")
+    return runtime
+
+
 async def _async_load_profile(hass: HomeAssistant, call: ServiceCall) -> None:
-    await _runtime(hass, call.data["entry_id"]).async_select_profile(call.data["filename"])
+    await _replay_runtime(hass, call.data["entry_id"]).async_select_profile(
+        call.data["filename"]
+    )
 
 
 async def _async_start_profile(hass: HomeAssistant, call: ServiceCall) -> None:
-    await _runtime(hass, call.data["entry_id"]).async_start_playback()
+    await _replay_runtime(hass, call.data["entry_id"]).async_start_playback()
 
 
 async def _async_pause_profile(hass: HomeAssistant, call: ServiceCall) -> None:
-    await _runtime(hass, call.data["entry_id"]).async_pause_playback()
+    await _replay_runtime(hass, call.data["entry_id"]).async_pause_playback()
 
 
 async def _async_stop_profile(hass: HomeAssistant, call: ServiceCall) -> None:
-    await _runtime(hass, call.data["entry_id"]).async_stop_playback()
+    await _replay_runtime(hass, call.data["entry_id"]).async_stop_playback()
 
 
 async def _async_reset_profile(hass: HomeAssistant, call: ServiceCall) -> None:
-    await _runtime(hass, call.data["entry_id"]).async_reset_playback()
+    await _replay_runtime(hass, call.data["entry_id"]).async_reset_playback()
 
 
 async def _async_step(hass: HomeAssistant, call: ServiceCall) -> None:
-    await _runtime(hass, call.data["entry_id"]).async_step(call.data.get("seconds", 1800))
+    await _replay_runtime(hass, call.data["entry_id"]).async_step(
+        call.data.get("seconds", 1800)
+    )
 
 
 async def _async_reset(hass: HomeAssistant, call: ServiceCall) -> None:
@@ -88,6 +122,14 @@ async def _async_set_state_of_charge(hass: HomeAssistant, call: ServiceCall) -> 
     """Set the stored energy of exactly one active virtual sandbox."""
     await _runtime(hass, call.data["entry_id"]).async_set_state_of_charge(
         call.data["state_of_charge"]
+    )
+
+
+async def _async_set_external_power(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Route external virtual-battery control through its sole runtime boundary."""
+    await _runtime(hass, call.data["entry_id"]).async_set_external_power(
+        call.data["power_w"],
+        call.data.get("valid_for_seconds", 60),
     )
 
 
@@ -182,6 +224,18 @@ def async_setup_services(hass: HomeAssistant) -> None:
     hass.services.async_register(DOMAIN, "step", _service_handler(hass, _async_step), schema=vol.Schema({_ENTRY_ID: str, vol.Optional("seconds"): vol.All(vol.Coerce(float), vol.Range(min=0.001, max=86_400))}))
     hass.services.async_register(DOMAIN, "reset", _service_handler(hass, _async_reset), schema=vol.Schema({_ENTRY_ID: str, vol.Optional("energy_wh"): vol.All(vol.Coerce(float), vol.Range(min=0, max=MAX_BATTERY_ENERGY_WH))}))
     hass.services.async_register(DOMAIN, "set_virtual_battery_state_of_charge", _service_handler(hass, _async_set_state_of_charge), schema=vol.Schema({_ENTRY_ID: str, vol.Required("state_of_charge"): _finite_percentage}))
+    hass.services.async_register(
+        DOMAIN,
+        "set_virtual_battery_external_power",
+        _service_handler(hass, _async_set_external_power),
+        schema=vol.Schema(
+            {
+                _ENTRY_ID: str,
+                vol.Required("power_w"): _finite_power,
+                vol.Optional("valid_for_seconds", default=60): _external_power_duration,
+            }
+        ),
+    )
     hass.services.async_register(DOMAIN, "snapshot_create", _service_handler(hass, _async_snapshot_create), schema=vol.Schema({_ENTRY_ID: str, _NAME: str, vol.Optional("replace", default=False): bool}))
     hass.services.async_register(DOMAIN, "snapshot_list", _service_handler(hass, _async_snapshot_list), schema=entry_schema, supports_response=SupportsResponse.ONLY)
     hass.services.async_register(DOMAIN, "snapshot_restore", _service_handler(hass, _async_snapshot_restore), schema=named_schema)

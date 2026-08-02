@@ -134,6 +134,7 @@ async def test_profile_files_are_entry_scoped_and_playback_splits_boundaries(has
     second = _runtime("profile-b")
     await first.async_restore_storage(hass)
     await second.async_restore_storage(hass)
+    await first.async_select_operating_mode("replay")
     content = _json_content(_samples())
     await _write_profile(hass, "profile-a", "day.json", content)
 
@@ -159,6 +160,7 @@ async def test_changed_profile_pauses_restore_without_mqtt_or_backend(hass) -> N
     """A changed owned file cannot silently resume persisted playback."""
     runtime = _runtime("profile-restore")
     await runtime.async_restore_storage(hass)
+    await runtime.async_select_operating_mode("replay")
     await _write_profile(hass, "profile-restore", "day.json", _json_content(_samples()))
     await runtime.async_select_profile("day.json")
     await runtime.async_checkpoint(immediate=True)

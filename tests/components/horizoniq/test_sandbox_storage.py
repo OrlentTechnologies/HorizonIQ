@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -87,6 +88,27 @@ async def test_clean_setup_has_disabled_default_without_store(hass) -> None:
     coordinator.async_pause_for_sandbox.assert_not_awaited()
 
 
+async def test_storage_restores_entry_local_mode_and_charging_source(hass) -> None:
+    """Mode and source persist without retaining any external power instruction."""
+    source, _ = _runtime("storage-mode-source", REGISTRATION_A)
+    await source.async_restore_storage(hass)
+    await source.async_select_charging_source("external")
+
+    restored, _ = _runtime("storage-mode-source", REGISTRATION_A)
+    await restored.async_restore_storage(hass)
+
+    assert restored.operating_mode == "virtual"
+    assert restored.charging_source == "external"
+    assert restored.external_power_w is None
+
+    await source.async_select_operating_mode("replay")
+    replay_restored, _ = _runtime("storage-mode-source", REGISTRATION_A)
+    await replay_restored.async_restore_storage(hass)
+
+    assert replay_restored.operating_mode == "replay"
+    assert replay_restored.charging_source == "virtual_battery"
+
+
 @pytest.mark.parametrize(
     "stage",
     (
@@ -102,6 +124,7 @@ async def test_storage_restore_failures_are_staged_sanitized_and_non_destructive
     hass, caplog, monkeypatch, stage: str
 ) -> None:
     """Every restore boundary reports only a bounded reason and safe defaults."""
+    caplog.set_level(logging.WARNING)
     source, _ = _runtime(f"storage-stage-{stage}", REGISTRATION_A)
     await source.async_restore_storage(hass)
     assert source._storage is not None
@@ -216,6 +239,7 @@ async def test_enabled_runtime_restart_restores_only_its_clock_and_task(hass) ->
     """An enabled entry restarts from its saved virtual time without wall-clock catchup."""
     runtime, _ = _runtime("storage-enabled", REGISTRATION_A)
     await runtime.async_restore_storage(hass)
+    await runtime.async_select_operating_mode("replay")
     await _enable(runtime, hass)
     await runtime.async_step()
     saved_time = runtime.virtual_time_utc
@@ -306,6 +330,7 @@ async def test_schema_ten_ledger_migration_resets_only_corrupted_ledgers(hass) -
     """The positional-ledger release keeps state but clears current and named totals."""
     runtime, _ = _runtime("storage-ledger-migration", REGISTRATION_A)
     await runtime.async_restore_storage(hass)
+    await runtime.async_select_operating_mode("replay")
     await _enable(runtime, hass)
     runtime.set_inputs(load_w=750, solar_w=100)
     await runtime.async_step(30)

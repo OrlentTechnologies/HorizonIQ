@@ -192,15 +192,15 @@ def test_fault_selector_uses_friendly_enum_labels() -> None:
     selector._remove_listener()
 
 
-def test_profile_controls_expose_selection_state_and_availability() -> None:
-    """Profile controls do not expose unknown or become unavailable when idle."""
+def test_profile_controls_expose_selection_state_and_virtual_availability() -> None:
+    """Profile selection remains known but is disabled outside Replay mode."""
     runtime = _runtime()
     profile = SandboxProfileSelect(runtime, runtime.entry_id)
     equipment = SandboxEquipmentProfileSelect(runtime, runtime.entry_id)
 
     assert profile.current_option == "Not selected"
     assert "Not selected" in profile.options
-    assert profile.available is True
+    assert profile.available is False
     assert equipment.available is True
     profile._remove_listener()
     equipment._remove_listener()

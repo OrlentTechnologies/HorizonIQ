@@ -244,12 +244,8 @@ async def test_paused_runtime_stages_forecasts_and_reset_reports_awaiting() -> N
     assert runtime.last_command_status is CommandStatus.NO_ACTION
     assert runtime.decision_summary == "No executable action; self-consumption applied."
 
-    runtime.set_clock_rate(ClockRate.X1)
-    await runtime._async_stage_direct_forecast(forecast)
-    assert runtime.forecast_health == "healthy"
-    assert runtime.last_command_status is CommandStatus.NO_ACTION
-
-    runtime.set_clock_rate(ClockRate.PAUSED)
+    with pytest.raises(ValueError, match="Replay mode"):
+        runtime.set_clock_rate(ClockRate.X1)
     runtime.reset()
     assert runtime.forecast_health == "awaiting_forecast"
     assert runtime.last_command_status is CommandStatus.AWAITING_FORECAST
