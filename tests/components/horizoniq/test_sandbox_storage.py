@@ -109,6 +109,104 @@ async def test_storage_restores_entry_local_mode_and_charging_source(hass) -> No
     assert replay_restored.charging_source == "virtual_battery"
 
 
+async def test_virtual_restore_ignores_stale_clock_without_simulating_downtime(hass) -> None:
+    """Schema-13 Virtual records retain energy but discard obsolete clock state."""
+    source, _ = _runtime("storage-virtual-wall-clock", REGISTRATION_A)
+    source._live_forecast_now = lambda: datetime(2026, 8, 4, 12, tzinfo=timezone.utc)
+    await source.async_restore_storage(hass)
+    source._state = BatteryState(6_000)
+    assert source._clock is not None
+    source._clock = source._clock.from_state(
+        ClockState(datetime(2026, 8, 4, 11, 28, tzinfo=timezone.utc), "paused")
+    )
+    await source.async_checkpoint(immediate=True)
+
+    restored, _ = _runtime("storage-virtual-wall-clock", REGISTRATION_A)
+    restored._live_forecast_now = lambda: datetime(2026, 8, 4, 12, tzinfo=timezone.utc)
+    await restored.async_restore_storage(hass)
+
+    assert restored.energy_wh == 6_000
+    assert restored.virtual_time_utc == datetime(2026, 8, 4, 12, tzinfo=timezone.utc)
+    assert restored.storage_diagnostic == "ignored_virtual_clock"
+    assert restored.simulator_enabled is False
+
+
+async def test_schema_twelve_mode_migration_is_idempotent_and_mode_aware(hass) -> None:
+    """Virtual ignores stale Replay values while Replay retains its clock exactly."""
+    now = datetime(2026, 8, 4, 12, tzinfo=timezone.utc)
+    virtual, _ = _runtime("storage-schema-twelve-virtual", REGISTRATION_A)
+    virtual._live_forecast_now = lambda: now
+    await virtual.async_restore_storage(hass)
+    virtual._state = BatteryState(6_000)
+    record = virtual._storage_record()
+    record["storage_schema_version"] = 12
+    snapshot = json.loads(record["current_snapshot"])
+    snapshot["clock_state"] = "unused-invalid-clock"
+    snapshot["replay_session"] = {"unused": "invalid"}
+    record["current_snapshot"] = json.dumps(snapshot, separators=(",", ":"))
+    record["replay_session"] = {"unused": "invalid"}
+    assert virtual._storage is not None
+    await virtual._storage.async_save(record)
+
+    migrated, _ = _runtime("storage-schema-twelve-virtual", REGISTRATION_A)
+    migrated._live_forecast_now = lambda: now
+    await migrated.async_restore_storage(hass)
+    assert migrated.operating_mode == "virtual"
+    assert migrated.energy_wh == 6_000
+    assert migrated.virtual_time_utc == now
+    assert migrated.storage_diagnostic == "ignored_virtual_clock"
+    await migrated.async_checkpoint(immediate=True)
+    first_record = await SandboxStorage(
+        hass, "storage-schema-twelve-virtual"
+    ).async_load()
+    assert first_record is not None
+    assert first_record["storage_schema_version"] == STORAGE_SCHEMA_VERSION
+
+    migrated_again, _ = _runtime("storage-schema-twelve-virtual", REGISTRATION_A)
+    migrated_again._live_forecast_now = lambda: now
+    await migrated_again.async_restore_storage(hass)
+    await migrated_again.async_checkpoint(immediate=True)
+    second_record = await SandboxStorage(
+        hass, "storage-schema-twelve-virtual"
+    ).async_load()
+    assert second_record == first_record
+
+    replay, _ = _runtime("storage-schema-twelve-replay", REGISTRATION_A)
+    await replay.async_restore_storage(hass)
+    await replay.async_select_operating_mode("replay")
+    replay_time = datetime(2026, 8, 4, 8, tzinfo=timezone.utc)
+    assert replay._clock is not None
+    replay._clock = replay._clock.from_state(ClockState(replay_time, "paused"))
+    replay_record = replay._storage_record()
+    replay_record["storage_schema_version"] = 12
+    assert replay._storage is not None
+    await replay._storage.async_save(replay_record)
+
+    replay_restored, _ = _runtime("storage-schema-twelve-replay", REGISTRATION_A)
+    await replay_restored.async_restore_storage(hass)
+    assert replay_restored.operating_mode == "replay"
+    assert replay_restored.virtual_time_utc == replay_time
+
+
+async def test_virtual_restore_rejects_invalid_core_battery_state(hass) -> None:
+    """Ignoring unused Replay fields never permits invalid battery state."""
+    source, _ = _runtime("storage-virtual-invalid-battery", REGISTRATION_A)
+    await source.async_restore_storage(hass)
+    record = source._storage_record()
+    snapshot = json.loads(record["current_snapshot"])
+    snapshot["battery_state"]["energy_wh"] = -1
+    record["current_snapshot"] = json.dumps(snapshot, separators=(",", ":"))
+    assert source._storage is not None
+    await source._storage.async_save(record)
+
+    restored, _ = _runtime("storage-virtual-invalid-battery", REGISTRATION_A)
+    await restored.async_restore_storage(hass)
+
+    assert restored.simulator_enabled is False
+    assert restored.energy_wh == 5_000
+    assert restored.storage_diagnostic is not None
+
+
 @pytest.mark.parametrize(
     "stage",
     (
@@ -215,9 +313,10 @@ async def test_storage_restore_keeps_known_sanitized_validation_reason(
 
 
 async def test_save_reload_restore_preserves_state_without_time_jump(hass) -> None:
-    """Disabled state restores exactly and does not advance during downtime."""
+    """Disabled Replay state restores exactly and does not advance during downtime."""
     runtime, _ = _runtime("storage-reload", REGISTRATION_A)
     await runtime.async_restore_storage(hass)
+    await runtime.async_select_operating_mode("replay")
     await _enable(runtime, hass)
     runtime.set_inputs(load_w=1_000, solar_w=0)
     await runtime.async_step()

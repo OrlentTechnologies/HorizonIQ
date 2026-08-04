@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 
-STORAGE_SCHEMA_VERSION: Final = 12
+STORAGE_SCHEMA_VERSION: Final = 13
 STORE_VERSION: Final = 1
 SNAPSHOT_SCHEMA_VERSION: Final = 4
 CHECKPOINT_DELAY_SECONDS: Final = 30

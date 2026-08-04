@@ -213,6 +213,8 @@ _OPERATING_MODES = frozenset({"virtual", "replay"})
 _CHARGING_SOURCES = frozenset({"virtual_battery", "external"})
 _DEFAULT_EXTERNAL_POWER_VALIDITY_SECONDS = 60
 _MAX_EXTERNAL_POWER_VALIDITY_SECONDS = 300
+_VIRTUAL_PHYSICS_CHUNK_SECONDS = 30
+_VIRTUAL_TIMING_GAP_SECONDS = 300
 
 
 @dataclass(slots=True)
@@ -442,6 +444,10 @@ class HorizonIQEntryRuntime:
     _external_power_w: float | None = None
     _external_power_expires_at_utc: datetime | None = None
     _external_power_expiry_handle: asyncio.TimerHandle | None = None
+    _virtual_monotonic_baseline: float | None = None
+    _virtual_next_refresh_monotonic: float | None = None
+    _virtual_timing_diagnostic: str | None = None
+    _virtual_refresh_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @property
     def is_sandbox_configured(self) -> bool:
@@ -565,8 +571,31 @@ class HorizonIQEntryRuntime:
 
     @property
     def virtual_time_utc(self) -> datetime | None:
-        """Return this sandbox's virtual timestamp."""
-        return self._clock.state.virtual_time_utc if self._clock is not None else None
+        """Return the active mode's timestamp for status and fault lifecycles."""
+        if self._clock is None:
+            return None
+        return self._runtime_now_utc()
+
+    def _runtime_now_utc(self) -> datetime:
+        """Return the sole mode-aware time source for this sandbox runtime."""
+        if self._operating_mode == "virtual":
+            now = self._live_forecast_now()
+            if now.tzinfo is None or now.utcoffset() is None:
+                raise ValueError("Virtual wall-clock provider returned a naive timestamp")
+            return now.astimezone(timezone.utc)
+        if self._clock is None:
+            raise ValueError("Sandbox clock is unavailable")
+        return self._clock.state.virtual_time_utc
+
+    @property
+    def time_source(self) -> str:
+        """Return the bounded active timing source for diagnostics."""
+        return "wall_clock" if self._operating_mode == "virtual" else "replay_clock"
+
+    @property
+    def timing_diagnostic(self) -> str | None:
+        """Return a bounded Virtual timing condition without clock values."""
+        return self._virtual_timing_diagnostic
 
     @property
     def clock_rate(self) -> str | None:
@@ -774,7 +803,7 @@ class HorizonIQEntryRuntime:
         )
         self._last_grid_power_w = 0.0
         self._last_battery_power_w = 0.0
-        self._clock = VirtualClock(datetime.now(timezone.utc))
+        self._clock = VirtualClock(self._live_forecast_now().astimezone(timezone.utc))
         self._cumulative_ledger = IntervalLedger()
         self._active_profile_id = None
         self._profile_cursor = None
@@ -793,19 +822,43 @@ class HorizonIQEntryRuntime:
             raise ValueError("Sandbox operating mode is invalid")
         if mode == self._operating_mode:
             return
+        wall_now = self._runtime_now_utc()
+        previous_mode = self._operating_mode
+        was_enabled = self.simulator_enabled
         self._operating_mode = mode
         self._cancel_active_control()
         if mode == "replay":
             # External instructions are meaningful only while Virtual mode
             # owns the wall-clock physics loop.
             self._charging_source = "virtual_battery"
+            self._cancel_virtual_schedule()
+            self._clear_pending_command()
+            self._staged_direct_forecast = None
+            self._direct_replay_payload = None
+            self._last_direct_replay_key = None
         if self._clock is not None:
             if mode == "virtual":
-                self._clock.reset(self._live_forecast_now())
-                self._clock.set_rate(ClockRate.X1)
+                # Virtual mode owns no independently advancing clock. Keep a
+                # harmless current clock value only for snapshot compatibility.
+                self._clock.reset(self._runtime_now_utc())
+                self._clock.set_rate(ClockRate.PAUSED)
+                self._clear_replay_state_for_virtual()
+                self._initialize_virtual_schedule()
             else:
+                self._clock.reset(wall_now)
                 self._clock.set_rate(ClockRate.PAUSED)
         self._playback_state = "stopped"
+        if previous_mode == "virtual" and mode == "replay" and was_enabled:
+            # Replay is deliberate and deterministic. Never carry a running
+            # wall-clock simulator into it.
+            await self.async_disable()
+        if (
+            mode == "virtual"
+            and self.simulator_enabled
+            and self._hass is not None
+            and previous_mode != mode
+        ):
+            await self._async_refresh_direct_forecast()
         await self.async_checkpoint(immediate=True)
         self._notify_listeners()
 
@@ -846,7 +899,7 @@ class HorizonIQEntryRuntime:
             self._config.max_charge_power_w,
             max(-self._config.max_discharge_power_w, power_w),
         )
-        self._external_power_expires_at_utc = self._live_forecast_now() + timedelta(
+        self._external_power_expires_at_utc = self._runtime_now_utc() + timedelta(
             seconds=valid_for_seconds
         )
         self._schedule_external_power_expiry(valid_for_seconds)
@@ -860,7 +913,7 @@ class HorizonIQEntryRuntime:
         return (
             self._external_power_w is not None
             and self._external_power_expires_at_utc is not None
-            and self._live_forecast_now() < self._external_power_expires_at_utc
+            and self._runtime_now_utc() < self._external_power_expires_at_utc
         )
 
     def _schedule_external_power_expiry(self, valid_for_seconds: int) -> None:
@@ -897,6 +950,48 @@ class HorizonIQEntryRuntime:
         self.last_command_status = CommandStatus.NO_ACTION
         self.last_command_reason = "No executable action; self-consumption applied."
 
+    def _initialize_virtual_schedule(self) -> None:
+        """Start a fresh per-entry monotonic baseline without catch-up work."""
+        if self._hass is None:
+            self._virtual_monotonic_baseline = None
+            self._virtual_next_refresh_monotonic = None
+            return
+        now = self._hass.loop.time()
+        self._virtual_monotonic_baseline = now
+        self._virtual_next_refresh_monotonic = now
+        self._virtual_timing_diagnostic = None
+
+    def _cancel_virtual_schedule(self) -> None:
+        """Discard Virtual-only timing state and any pending refresh deadline."""
+        self._virtual_monotonic_baseline = None
+        self._virtual_next_refresh_monotonic = None
+        self._virtual_timing_diagnostic = None
+
+    def _virtual_refresh_interval_seconds(self) -> float:
+        """Return the current coordinator cadence as a safe monotonic interval."""
+        cadence = getattr(self.coordinator, "effective_forecast_cadence_minutes", 30)
+        if isinstance(cadence, bool):
+            return 30 * 60
+        try:
+            seconds = float(cadence) * 60
+        except (TypeError, ValueError):
+            return 30 * 60
+        return seconds if math.isfinite(seconds) and seconds > 0 else 30 * 60
+
+    def _clear_replay_state_for_virtual(self) -> None:
+        """Ensure no Replay profile, bridge state, or command crosses modes."""
+        self._cancel_replay_timeout()
+        self._cancel_replay_heartbeat()
+        self._clear_profile_state()
+        self._replay_session = None
+        self._replay_starting_energy_wh = None
+        self._replay_import_for_export_enabled = None
+        self._replay_export_for_solar_headroom = None
+        self._replay_simulate_api_failure = False
+        self._replay_pending_resume = False
+        self._replay_auto_resume_pending = False
+        self._prepared_replay_request = None
+
     def _validated_operating_configuration(
         self, record_value: object
     ) -> tuple[str, str]:
@@ -904,16 +999,19 @@ class HorizonIQEntryRuntime:
         record = record_mapping(record_value)
         if record is None:
             raise ValueError("Stored state is not an object")
-        if record.get("storage_schema_version") != STORAGE_SCHEMA_VERSION:
+        storage_schema = record.get("storage_schema_version")
+        if storage_schema in {12, STORAGE_SCHEMA_VERSION}:
+            mode = record.get("operating_mode")
+            source = record.get("charging_source")
+            if mode not in _OPERATING_MODES or source not in _CHARGING_SOURCES:
+                raise ValueError("Stored operating mode or charging source is invalid")
+            return mode, source
+        if storage_schema != STORAGE_SCHEMA_VERSION:
             # Before schema 12 every sandbox used the deterministic virtual
             # clock. Restore those valid records as Replay to preserve their
             # original timing and playback semantics.
             return "replay", "virtual_battery"
-        mode = record.get("operating_mode")
-        source = record.get("charging_source")
-        if mode not in _OPERATING_MODES or source not in _CHARGING_SOURCES:
-            raise ValueError("Stored operating mode or charging source is invalid")
-        return mode, source
+        raise ValueError("Stored operating mode or charging source is invalid")
 
     async def async_restore_storage(self, hass: HomeAssistant) -> None:
         """Restore only this entry's validated state, without inferring identity."""
@@ -929,6 +1027,9 @@ class HorizonIQEntryRuntime:
             if record is None:
                 return
             stage = "record_validation"
+            operating_mode, charging_source = self._validated_operating_configuration(
+                record
+            )
             (
                 snapshot,
                 enabled,
@@ -937,10 +1038,7 @@ class HorizonIQEntryRuntime:
                 replay_state,
                 command_ledger,
                 control_config,
-            ) = self._validated_storage_record(record)
-            operating_mode, charging_source = self._validated_operating_configuration(
-                record
-            )
+            ) = self._validated_storage_record(record, operating_mode=operating_mode)
             migrate_corrupted_ledger = _requires_ledger_migration(record)
             if migrate_corrupted_ledger:
                 snapshot = _snapshot_without_corrupted_ledger(snapshot)
@@ -966,10 +1064,18 @@ class HorizonIQEntryRuntime:
             self._accepted_command_ids = command_ledger
             self._clear_pending_command()
             self._reset_node_red_status()
-            if operating_mode == "virtual" and (
-                profile_state[0] is not None or replay_state[0] is not None
-            ):
-                raise ValueError("Stored Replay state is incompatible with Virtual mode")
+            if operating_mode == "virtual":
+                self._command = Command(OperatingMode.SELF_CONSUMPTION)
+                self._last_direct_command_id = None
+                self._staged_direct_forecast = None
+                self._clear_external_power()
+                self._clear_replay_state_for_virtual()
+                if self._clock is not None:
+                    self._clock.reset(self._runtime_now_utc())
+                    self._clock.set_rate(ClockRate.PAUSED)
+                self.storage_diagnostic = "ignored_virtual_clock"
+                profile_state = (None, None, "stopped")
+                replay_state = (None, None, None, None, False, False, False)
             stage = "profile_restore"
             if not await self._async_restore_profile_state(profile_state):
                 raise ValueError(
@@ -1656,6 +1762,21 @@ class HorizonIQEntryRuntime:
             else self._config
         )
         snapshot = self._validated_snapshot(raw_snapshot, config=restored_config)
+        if self._operating_mode == "virtual":
+            snapshot = replace(
+                snapshot,
+                clock_state=ClockState(
+                    self._runtime_now_utc(), ClockRate.PAUSED.value, 0, 0
+                ),
+                active_profile_id=None,
+                profile_cursor=None,
+                active_command=Command(OperatingMode.SELF_CONSUMPTION),
+                command_status=CommandStatus.NO_ACTION,
+                playback_state="stopped",
+                selected_profile_filename=None,
+                profile_hash=None,
+                replay_session=None,
+            )
         restored_faults = (
             validate_faults(list(raw_snapshot.faults))
             if raw_snapshot.faults
@@ -1765,7 +1886,8 @@ class HorizonIQEntryRuntime:
             "accepted_command_ids": ledger_to_storage(
                 prune_command_ledger(
                     self._accepted_command_ids,
-                    self.virtual_time_utc or datetime.now(timezone.utc),
+                    self.virtual_time_utc
+                    or self._live_forecast_now().astimezone(timezone.utc),
                 )
             ),
             "faults": [fault.to_dict() for fault in self._faults_for_storage()],
@@ -1782,7 +1904,7 @@ class HorizonIQEntryRuntime:
         record = record_mapping(record_value)
         if record is None:
             raise ValueError("Stored fault state is invalid")
-        if record.get("storage_schema_version") not in {5, 6, 7, 8, 9, 10, 11, STORAGE_SCHEMA_VERSION}:
+        if record.get("storage_schema_version") not in {5, 6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}:
             return (), {}
         faults = validate_faults(record.get("faults"))
         raw_snapshots = record.get("fault_snapshots")
@@ -1796,7 +1918,10 @@ class HorizonIQEntryRuntime:
         return faults, snapshots
 
     def _validated_storage_record(
-        self, record_value: object,
+        self,
+        record_value: object,
+        *,
+        operating_mode: str,
     ) -> tuple[
         SimulationSnapshot,
         bool,
@@ -1810,7 +1935,7 @@ class HorizonIQEntryRuntime:
         if record is None:
             raise ValueError("Stored state is not an object")
         storage_schema = record.get("storage_schema_version")
-        if storage_schema not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, STORAGE_SCHEMA_VERSION}:
+        if storage_schema not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}:
             raise ValueError("Unsupported storage schema")
         if record.get("snapshot_schema_version") not in {1, 2, 3, SNAPSHOT_SCHEMA_VERSION}:
             raise ValueError("Unsupported snapshot schema")
@@ -1828,7 +1953,7 @@ class HorizonIQEntryRuntime:
         control_config = self._config
         if control_config is None:
             raise ValueError("Sandbox configuration is unavailable")
-        if storage_schema in {8, 9, 10, 11, STORAGE_SCHEMA_VERSION}:
+        if storage_schema in {8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}:
             control_config = _control_config_from_storage(
                 record.get("control_config"),
                 fallback=control_config,
@@ -1846,7 +1971,10 @@ class HorizonIQEntryRuntime:
             self._validated_snapshot(from_json(snapshot_json), config=control_config)
             snapshots[normalized] = snapshot_json
         profile_state: tuple[str | None, str | None, str] = (None, None, "stopped")
-        if storage_schema in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, STORAGE_SCHEMA_VERSION}:
+        if (
+            operating_mode == "replay"
+            and storage_schema in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}
+        ):
             filename = record.get("selected_profile_filename")
             profile_hash = record.get("profile_hash")
             playback_state = record.get("playback_state")
@@ -1870,7 +1998,10 @@ class HorizonIQEntryRuntime:
             False,
             False,
         )
-        if storage_schema in {3, 4, 5, 6, 7, 8, 9, 10, 11, STORAGE_SCHEMA_VERSION}:
+        if (
+            operating_mode == "replay"
+            and storage_schema in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}
+        ):
             session_value = record.get("replay_session")
             starting_energy = record.get("replay_starting_energy_wh")
             import_for_export = record.get("replay_import_for_export_enabled")
@@ -1878,12 +2009,12 @@ class HorizonIQEntryRuntime:
             pending_resume = record.get("replay_pending_resume")
             auto_resume = (
                 record.get("replay_auto_resume_pending")
-                if storage_schema in {4, 5, 6, 7, 8, 9, 10, 11, STORAGE_SCHEMA_VERSION}
+                if storage_schema in {4, 5, 6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}
                 else None
             )
             simulate_api_failure = (
                 record.get("replay_simulate_api_failure")
-                if storage_schema in {8, 9, 10, 11, STORAGE_SCHEMA_VERSION}
+                if storage_schema in {8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}
                 else False
             )
             if session_value is None:
@@ -1895,7 +2026,7 @@ class HorizonIQEntryRuntime:
                         export_for_solar_headroom,
                     )
                 ) or pending_resume is not False or (
-                    storage_schema in {4, 5, 6, 7, 8, 9, 10, 11, STORAGE_SCHEMA_VERSION} and auto_resume is not False
+                    storage_schema in {4, 5, 6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION} and auto_resume is not False
                 ) or simulate_api_failure is not False:
                     raise ValueError("Stored replay state is invalid")
             else:
@@ -1914,7 +2045,7 @@ class HorizonIQEntryRuntime:
                     export_for_solar_headroom, bool
                 ) or not isinstance(pending_resume, bool):
                     raise ValueError("Stored replay settings are invalid")
-                if storage_schema in {4, 5, 6, 7, 8, 9, 10, 11, STORAGE_SCHEMA_VERSION} and not isinstance(auto_resume, bool):
+                if storage_schema in {4, 5, 6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION} and not isinstance(auto_resume, bool):
                     raise ValueError("Stored replay resume state is invalid")
                 if not isinstance(simulate_api_failure, bool):
                     raise ValueError("Stored replay simulated API failure state is invalid")
@@ -1928,18 +2059,25 @@ class HorizonIQEntryRuntime:
                     pending_resume,
                     (
                         auto_resume
-                        if storage_schema in {4, 5, 6, 7, 8, 9, 10, 11, STORAGE_SCHEMA_VERSION}
+                        if storage_schema in {4, 5, 6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}
                         else session.state in _REPLAY_ACTIVE_STATES or pending_resume
                     ),
                     simulate_api_failure,
                 )
-        snapshot = self._validated_snapshot(from_json(serialized), config=control_config)
+        snapshot = (
+            self._validated_virtual_snapshot(serialized, config=control_config)
+            if operating_mode == "virtual"
+            else self._validated_snapshot(from_json(serialized), config=control_config)
+        )
         command_ledger = (
             ledger_from_storage(
                 record.get("accepted_command_ids"),
                 snapshot.clock_state.virtual_time_utc,
             )
-            if storage_schema in {6, 7, 8, 9, 10, 11, STORAGE_SCHEMA_VERSION}
+            if (
+                operating_mode == "replay"
+                and storage_schema in {6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}
+            )
             else ()
         )
         return (
@@ -1950,6 +2088,38 @@ class HorizonIQEntryRuntime:
             replay_state,
             command_ledger,
             control_config,
+        )
+
+    def _validated_virtual_snapshot(
+        self,
+        serialized: str,
+        *,
+        config: BatteryConfig,
+    ) -> SimulationSnapshot:
+        """Validate Virtual battery data while ignoring stale Replay-only fields."""
+        try:
+            raw = json.loads(serialized)
+        except (TypeError, ValueError) as err:
+            raise ValueError("Stored snapshot is invalid") from err
+        if not isinstance(raw, dict):
+            raise ValueError("Stored snapshot is invalid")
+        raw["clock_state"] = {
+            "virtual_time_utc": self._runtime_now_utc().isoformat(),
+            "rate": ClockRate.PAUSED.value,
+            "sequence": 0,
+            "reset_generation": 0,
+        }
+        raw["active_profile_id"] = None
+        raw["profile_cursor"] = None
+        raw["selected_profile_filename"] = None
+        raw["profile_hash"] = None
+        raw["playback_state"] = "stopped"
+        raw["replay_session"] = None
+        raw["active_command"] = None
+        raw["command_status"] = CommandStatus.NO_ACTION.value
+        return self._validated_snapshot(
+            from_json(json.dumps(raw, separators=(",", ":"))),
+            config=config,
         )
 
     def _simulation_snapshot(self) -> SimulationSnapshot:
@@ -2126,11 +2296,11 @@ class HorizonIQEntryRuntime:
         self._hass = hass
         try:
             if self._operating_mode == "virtual" and self._clock is not None:
-                # Virtual commands and physics both use real UTC. This prevents
-                # a paused replay clock from making a current command forever
-                # "not yet valid" after a mode switch or restart.
-                self._clock.reset(self._live_forecast_now())
-                self._clock.set_rate(ClockRate.X1)
+                # The serialized clock is retained solely for snapshots. It is
+                # never consulted by Virtual timing or physics.
+                self._clock.reset(self._runtime_now_utc())
+                self._clock.set_rate(ClockRate.PAUSED)
+                self._initialize_virtual_schedule()
             await self.coordinator.async_pause_for_sandbox()
             self._coordinator_paused = True
             self._subscribe_to_coordinator_forecasts()
@@ -2192,6 +2362,7 @@ class HorizonIQEntryRuntime:
             )
         self._cancel_replay_timeout()
         self._cancel_replay_heartbeat()
+        self._cancel_virtual_schedule()
         self._clear_external_power()
         self._freeze_fault_durations()
         self._cancel_all_fault_work()
@@ -2278,7 +2449,8 @@ class HorizonIQEntryRuntime:
         self.last_command_status = CommandStatus.AWAITING_FORECAST
         self.last_command_reason = "Awaiting direct forecast."
         self._direct_forecast_health = "awaiting_forecast"
-        self._clock.reset(datetime.now(timezone.utc))
+        if self._operating_mode == "replay":
+            self._clock.reset(self._live_forecast_now().astimezone(timezone.utc))
         self._schedule_immediate_checkpoint()
         self._notify_listeners()
 
@@ -2420,7 +2592,7 @@ class HorizonIQEntryRuntime:
         if not self.simulator_enabled or self._clock is None:
             raise ValueError("Sandbox is inactive")
         selected = next(
-            (item for item in standard_scenarios(self._clock.state.virtual_time_utc)
+            (item for item in standard_scenarios(self._runtime_now_utc())
              if item.identifier == scenario),
             None,
         )
@@ -2442,17 +2614,87 @@ class HorizonIQEntryRuntime:
                 await asyncio.sleep(_LOOP_INTERVAL_SECONDS)
                 if not self.simulator_enabled or self._clock is None:
                     return
+                if self._operating_mode == "virtual":
+                    await self._async_virtual_tick(hass)
+                    continue
                 before = self._clock.state.virtual_time_utc
                 after = self._clock.advance(_LOOP_INTERVAL_SECONDS).virtual_time_utc
                 elapsed_seconds = (after - before).total_seconds()
                 if elapsed_seconds:
-                    if after.minute % 30 == 0 and after.second == 0:
-                        await self._async_refresh_direct_forecast()
                     await self._async_simulate(elapsed_seconds, hass=hass)
         except asyncio.CancelledError:
             raise
         except Exception:
             await self.async_disable()
+
+    async def _async_virtual_tick(self, hass: HomeAssistant) -> None:
+        """Apply one real-time Virtual interval using monotonic elapsed time."""
+        now_monotonic = hass.loop.time()
+        previous_monotonic = self._virtual_monotonic_baseline
+        self._virtual_monotonic_baseline = now_monotonic
+        if previous_monotonic is None:
+            return
+        elapsed_seconds = now_monotonic - previous_monotonic
+        if elapsed_seconds <= 0:
+            return
+        if elapsed_seconds > _VIRTUAL_TIMING_GAP_SECONDS:
+            self._virtual_timing_diagnostic = "virtual_timing_gap"
+            now_utc = self._runtime_now_utc()
+            if (
+                self._command is not None
+                and self._command.expires_at_utc is not None
+                and self._command.expires_at_utc <= now_utc
+            ):
+                self._cancel_active_control()
+            elif not self._external_power_is_current():
+                self._clear_external_power()
+            await self._async_refresh_virtual_if_due(now_monotonic)
+            self._notify_listeners()
+            return
+        await self._async_refresh_virtual_if_due(now_monotonic)
+        await self._async_simulate_virtual_elapsed(
+            elapsed_seconds,
+            self._runtime_now_utc(),
+            hass=hass,
+        )
+
+    async def _async_refresh_virtual_if_due(self, now_monotonic: float) -> None:
+        """Refresh the direct forecast on its monotonic cadence deadline."""
+        deadline = self._virtual_next_refresh_monotonic
+        if deadline is None or now_monotonic >= deadline:
+            await self._async_refresh_direct_forecast()
+
+    async def _async_simulate_virtual_elapsed(
+        self,
+        elapsed_seconds: float,
+        end_time: datetime,
+        *,
+        hass: HomeAssistant | None,
+    ) -> None:
+        """Apply real elapsed time in bounded segments ending at wall UTC."""
+        start_time = end_time - timedelta(seconds=elapsed_seconds)
+        current_time = start_time
+        while current_time < end_time:
+            segment_seconds = min(
+                _VIRTUAL_PHYSICS_CHUNK_SECONDS,
+                (end_time - current_time).total_seconds(),
+            )
+            for boundary in (
+                self._command.expires_at_utc if self._command is not None else None,
+                self._external_power_expires_at_utc,
+            ):
+                if boundary is not None and current_time < boundary < current_time + timedelta(seconds=segment_seconds):
+                    segment_seconds = (boundary - current_time).total_seconds()
+            if segment_seconds <= 0:
+                break
+            current_time += timedelta(seconds=segment_seconds)
+            await self._async_simulate_segment(
+                segment_seconds,
+                current_time,
+                self.load_w,
+                self.solar_w,
+                hass=hass,
+            )
 
     async def _async_simulate(
         self,
@@ -2467,6 +2709,13 @@ class HorizonIQEntryRuntime:
             or self._state is None
             or self._clock is None
         ):
+            return
+        if self._operating_mode == "virtual":
+            await self._async_simulate_virtual_elapsed(
+                elapsed_seconds,
+                self._runtime_now_utc(),
+                hass=hass,
+            )
             return
         end_time = self._clock.state.virtual_time_utc
         start_time = end_time - timedelta(seconds=elapsed_seconds)
@@ -2563,7 +2812,26 @@ class HorizonIQEntryRuntime:
         if self._config is None or self._state is None:
             return
         command = self._command
-        if self._operating_mode == "virtual" and self._charging_source == "external":
+        expired_at_segment_end = False
+        if (
+            self._operating_mode == "virtual"
+            and command is not None
+            and command.expires_at_utc is not None
+            and virtual_time_utc - timedelta(seconds=elapsed_seconds)
+            < command.expires_at_utc
+            <= virtual_time_utc
+        ):
+            # The interval ends at the command boundary. Keep the command
+            # active for the preceding elapsed interval, then transition to
+            # safe self-consumption for the next one.
+            command = replace(
+                command,
+                expires_at_utc=virtual_time_utc + timedelta(microseconds=1),
+            )
+            expired_at_segment_end = True
+        if expired_at_segment_end:
+            pass
+        elif self._operating_mode == "virtual" and self._charging_source == "external":
             if self._external_power_is_current() and self._external_power_w is not None:
                 # The physics model accepts a grid setpoint. Offset the requested
                 # grid power so the requested external value is battery AC power
@@ -2571,7 +2839,7 @@ class HorizonIQEntryRuntime:
                 command = Command(
                     OperatingMode.GRID_SETPOINT,
                     load_w - solar_w + self._external_power_w,
-                    self._live_forecast_now(),
+                    self._runtime_now_utc(),
                     self._external_power_expires_at_utc,
                 )
             else:
@@ -2591,6 +2859,12 @@ class HorizonIQEntryRuntime:
         self._state = result.state
         self._last_grid_power_w = result.actual_grid_power_w
         self._last_battery_power_w = result.battery_ac_power_w
+        if expired_at_segment_end:
+            self._command = Command(OperatingMode.SELF_CONSUMPTION)
+            self._last_direct_command_id = None
+            self.last_command_status = CommandStatus.FALLBACK_EXPIRED
+            self.last_command_reason = "Command expired; self-consumption used."
+            self._direct_forecast_health = "awaiting_forecast"
         if self._operating_mode == "virtual" and self._charging_source == "external":
             self.last_command_status = (
                 CommandStatus.APPLIED
@@ -2626,17 +2900,27 @@ class HorizonIQEntryRuntime:
             not self.simulator_enabled
             or self._operating_mode != "virtual"
             or self._config is None
-            or self._clock is None
         ):
             return
-        try:
-            forecast = await self.coordinator.async_fetch_sandbox_forecast()
-        except Exception as err:
-            self._logger_debug_direct_failure(err)
-            forecast = getattr(self.coordinator, "last_direct_forecast", None)
-        await self._async_stage_direct_forecast(
-            forecast if isinstance(forecast, Forecast) else None
-        )
+        async with self._virtual_refresh_lock:
+            try:
+                forecast = await self.coordinator.async_fetch_sandbox_forecast()
+            except Exception as err:
+                self._logger_debug_direct_failure(err)
+                forecast = getattr(self.coordinator, "last_direct_forecast", None)
+            finally:
+                if (
+                    self.simulator_enabled
+                    and self._hass is not None
+                    and self._operating_mode == "virtual"
+                ):
+                    self._virtual_next_refresh_monotonic = (
+                        self._hass.loop.time()
+                        + self._virtual_refresh_interval_seconds()
+                    )
+            await self._async_stage_direct_forecast(
+                forecast if isinstance(forecast, Forecast) else None
+            )
 
     def _subscribe_to_coordinator_forecasts(self) -> None:
         """Stage normal coordinator updates even while virtual time is paused."""
@@ -2663,10 +2947,15 @@ class HorizonIQEntryRuntime:
             not self.simulator_enabled
             or self._operating_mode != "virtual"
             or self._config is None
-            or self._clock is None
         ):
             return
         async with self._direct_forecast_lock:
+            if (
+                not self.simulator_enabled
+                or self._operating_mode != "virtual"
+                or self._config is None
+            ):
+                return
             if forecast is None:
                 self._command = None
                 self.last_command_status = CommandStatus.FALLBACK_MISSING
@@ -2675,7 +2964,7 @@ class HorizonIQEntryRuntime:
                 await self.async_checkpoint(immediate=True)
                 self._notify_listeners()
                 return
-            live_now_utc = self._live_forecast_now()
+            live_now_utc = self._runtime_now_utc()
             validation = validate_live_forecast(
                 forecast,
                 now_utc=live_now_utc,
@@ -2755,9 +3044,9 @@ class HorizonIQEntryRuntime:
 
     def _staged_forecast_covers_virtual_time(self) -> bool:
         """Only reapply a cached plan when it is current after a reset."""
-        if self._staged_direct_forecast is None or self._clock is None:
+        if self._staged_direct_forecast is None:
             return False
-        now_utc = self._live_forecast_now()
+        now_utc = self._runtime_now_utc()
         return any(
             period.starts_at_utc <= now_utc < period.starts_at_utc + timedelta(minutes=30)
             for period in self._staged_direct_forecast.periods
@@ -3468,9 +3757,9 @@ class HorizonIQEntryRuntime:
     def _build_simulator_status(self) -> SimulatorStatus:
         """Map only entry-owned synthetic state to the frozen simulator schema."""
         timestamp = (
-            self._clock.state.virtual_time_utc
+            self._runtime_now_utc()
             if self._clock is not None
-            else datetime.now(timezone.utc)
+            else self._live_forecast_now().astimezone(timezone.utc)
         )
         unavailable = self._config is None or self._state is None or self._clock is None
         if unavailable:
@@ -3485,7 +3774,10 @@ class HorizonIQEntryRuntime:
         elif self._mqtt_fault_disconnected:
             state = SimulatorStatusState.UNHEALTHY
             reason = "Sandbox MQTT bridge is faulted."
-        elif self._clock.state.rate == ClockRate.PAUSED.value or self._playback_state == "paused":
+        elif self._operating_mode == "replay" and (
+            self._clock.state.rate == ClockRate.PAUSED.value
+            or self._playback_state == "paused"
+        ):
             state = SimulatorStatusState.PAUSED
             reason = None
         else:

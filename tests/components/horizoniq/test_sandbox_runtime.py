@@ -1,6 +1,7 @@
 """Tests for entry-local virtual-battery runtime ownership."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import datetime, timezone
 
 import pytest
 
@@ -162,7 +163,7 @@ async def test_failed_mqtt_setup_cleans_up_only_its_runtime(hass) -> None:
 async def test_virtual_mode_external_power_uses_physics_and_expires(hass) -> None:
     """External control is entry-local, bounded, and never changes SoC directly."""
     runtime, _ = _runtime()
-    runtime._live_forecast_now = lambda: runtime.virtual_time_utc
+    runtime._live_forecast_now = lambda: datetime(2026, 8, 4, tzinfo=timezone.utc)
     with patch(
         "custom_components.horizoniq.sandbox_runtime.mqtt.async_subscribe",
         new=AsyncMock(return_value=lambda: None),
@@ -170,7 +171,7 @@ async def test_virtual_mode_external_power_uses_physics_and_expires(hass) -> Non
         await runtime.async_enable(hass)
     assert runtime.operating_mode == "virtual"
     assert runtime.charging_source == "virtual_battery"
-    assert runtime.clock_rate == "1x"
+    assert runtime.clock_rate == "paused"
 
     await runtime.async_select_charging_source("external")
     before = runtime.energy_wh

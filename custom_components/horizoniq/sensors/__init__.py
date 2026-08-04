@@ -150,7 +150,9 @@ class SandboxRuntimeSensor(SensorEntity):
     @property
     def available(self) -> bool:
         """Keep persisted virtual-battery state visible while simulation is stopped."""
-        return self._runtime.virtual_entity_available
+        return self._runtime.virtual_entity_available and not (
+            self._key == "clock" and self._runtime.operating_mode == "virtual"
+        )
 
     @property
     def native_value(self) -> str | float | None:
@@ -194,6 +196,7 @@ class SandboxRuntimeSensor(SensorEntity):
             "gx_id": self._runtime.pretend_gx_id,
             "clock_rate": self._runtime.clock_rate,
             "operating_mode": self._runtime.operating_mode,
+            "time_source": self._runtime.time_source,
             "charging_source": self._runtime.charging_source,
             "active_setpoint_w": _rounded_number(self._runtime.active_setpoint_w),
             "active_action": self._runtime.last_command_reason,
@@ -206,6 +209,7 @@ class SandboxRuntimeSensor(SensorEntity):
             "reserve_wh": _rounded_number(self._runtime.reserve_wh),
             "command_reason": _friendly_state(self._runtime.last_command_reason),
             "storage_diagnostic": self._runtime.storage_diagnostic,
+            "timing_diagnostic": self._runtime.timing_diagnostic,
             "profile": self._runtime.selected_profile_filename or "Not selected",
             "profile_cursor": (
                 self._runtime.profile_cursor.index

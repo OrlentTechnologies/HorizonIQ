@@ -202,7 +202,7 @@ async def test_service_and_number_update_paused_virtual_battery_entities(hass) -
         energy = _entity_id(hass, "sensor", entry.entry_id, "energy")
 
         await hass.services.async_call("switch", "turn_on", {"entity_id": switch}, blocking=True)
-        assert runtime.clock_rate == ClockRate.X1.value
+        assert runtime.clock_rate == ClockRate.PAUSED.value
         time_before = runtime.virtual_time_utc
         number_state = hass.states.get(number)
         assert number_state.attributes["mode"] == "box"

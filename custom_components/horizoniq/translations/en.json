@@ -108,7 +108,7 @@
     "stop_profile": {"name": "Stop sandbox profile", "description": "Stop playback and return to safe self-consumption."},
     "reset_profile": {"name": "Reset sandbox profile", "description": "Reset the selected profile cursor."},
     "step": {"name": "Step sandbox", "description": "Advance one active sandbox by virtual seconds."},
-    "reset": {"name": "Reset sandbox", "description": "Reset one sandbox battery and virtual clock."},
+    "reset": {"name": "Reset sandbox", "description": "Reset one sandbox battery; Replay also resets its deterministic clock."},
     "set_virtual_battery_state_of_charge": {"name": "Set virtual battery state of charge", "description": "Set stored energy for one active virtual Sandbox from its reserve through 100%.", "fields": {"entry_id": {"name": "Config entry ID"}, "state_of_charge": {"name": "State of charge"}}},
     "set_virtual_battery_external_power": {"name": "Set virtual battery external power", "description": "Apply a bounded local external-controller power instruction to one active Virtual-mode Sandbox.", "fields": {"entry_id": {"name": "Config entry ID"}, "power_w": {"name": "Power"}, "valid_for_seconds": {"name": "Validity"}}},
     "snapshot_create": {"name": "Create sandbox snapshot", "description": "Save an entry-local reproducible snapshot."},
