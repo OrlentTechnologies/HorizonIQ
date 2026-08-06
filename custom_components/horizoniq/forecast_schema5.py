@@ -5,12 +5,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import math
 
 
 SCHEMA_VERSION = 5
 PLAN_KINDS = frozenset({"live", "import_for_export_advisory", "sandbox_replay"})
+SCHEMA5_PERIOD_DURATION = timedelta(minutes=30)
 REASON_CODES = frozenset(
     {
         "none",
@@ -423,6 +424,41 @@ class Schema5Forecast:
             "saving": self.saving,
             "periods": [period.to_dict() for period in self.periods],
         }
+
+
+def select_current_schema5_period(
+    forecast: Schema5Forecast | None,
+    now_utc: datetime | None,
+) -> Schema5Period | None:
+    """Return the accepted current half-hour schema-5 period in UTC.
+
+    A stale, unsupported, or malformed in-memory forecast is deliberately
+    unavailable to consumers.  Keeping the timestamp parsing here gives every
+    entity the same inclusive-start, exclusive-end boundary behavior.
+    """
+    if (
+        not isinstance(forecast, Schema5Forecast)
+        or forecast.schema_version != SCHEMA_VERSION
+        or forecast.stale
+        or forecast.plan_kind not in PLAN_KINDS
+        or now_utc is None
+        or now_utc.tzinfo is None
+        or now_utc.utcoffset() is None
+    ):
+        return None
+
+    current_time = now_utc.astimezone(timezone.utc)
+    for period in forecast.periods:
+        try:
+            period_start = datetime.fromisoformat(period.date.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if period_start.tzinfo is None or period_start.utcoffset() is None:
+            continue
+        period_start = period_start.astimezone(timezone.utc)
+        if period_start <= current_time < period_start + SCHEMA5_PERIOD_DURATION:
+            return period
+    return None
 
 
 def parse_schema5_forecast(payload: Mapping[str, object]) -> Schema5Forecast | None:

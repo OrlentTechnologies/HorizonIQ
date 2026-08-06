@@ -16,6 +16,7 @@ from custom_components.horizoniq.forecast_schema5 import (
     REASON_CODES,
     Schema5ForecastError,
     parse_schema5_forecast,
+    select_current_schema5_period,
 )
 from custom_components.horizoniq.coordinator import HorizonIQCoordinator
 from custom_components.horizoniq.coordinator_helpers import build_snapshot
@@ -357,6 +358,23 @@ def test_zero_period_schema5_forecast_is_unavailable_and_kept_complete() -> None
     assert entity.native_value == 0
     assert entity.extra_state_attributes["health"] == "Unavailable"
     assert entity.extra_state_attributes["forecast"]["periods"] == []
+
+
+def test_current_schema5_period_uses_utc_half_hour_boundaries() -> None:
+    """The shared selector includes a period start and excludes its end."""
+    forecast = parse_schema5_forecast(_payload())
+
+    assert forecast is not None
+    first = forecast.periods[0]
+    second = forecast.periods[1]
+    start = datetime.fromisoformat(first.date.replace("Z", "+00:00"))
+
+    assert select_current_schema5_period(forecast, start) == first
+    assert (
+        select_current_schema5_period(forecast, start + timedelta(minutes=29, seconds=59))
+        == first
+    )
+    assert select_current_schema5_period(forecast, start + timedelta(minutes=30)) == second
 
 
 def test_stale_last_good_forecast_remains_visible_after_refresh_failure() -> None:

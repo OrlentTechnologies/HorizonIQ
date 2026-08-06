@@ -63,7 +63,14 @@ These are available in `Add Integration` and in `Configure` for existing entries
 
 Behavior:
 - `Import` is on when API response contains `shouldImport = true`.
-- `Export` is the inverse of `Import`.
+- `Export` is on only for the current schema-5 half-hour period when the
+  authoritative action is `export_for_profit` and import-for-export is enabled.
+  Live and Virtual use `recommendedAction`; Replay uses `simulationAction`.
+  It is off for advisory plans and all other actions, including
+  `export_for_solar_headroom`, and is unknown when no accepted current period
+  is available. Its bounded attributes identify the plan/action source,
+  selected action, expected export kWh, and whether the executable action is
+  also `export_for_profit`.
 
 ### Sensors
 

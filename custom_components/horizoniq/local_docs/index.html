@@ -100,6 +100,12 @@
         <li><code>HorizonIQ Import</code></li>
         <li><code>HorizonIQ Export</code></li>
       </ul>
+      <p><code>Export</code> is on only when the current schema-5 period explicitly
+      selects <code>export_for_profit</code> with import-for-export enabled. Live
+      and Virtual use <code>recommendedAction</code>; Replay uses
+      <code>simulationAction</code>. Advisory plans and solar-headroom export do
+      not turn it on. Its attributes expose only the plan/action source,
+      selected action, expected export kWh, and executable status.</p>
       <p><strong>Sensors</strong></p>
       <ul>
         <li><code>HorizonIQ Total Cost</code></li>

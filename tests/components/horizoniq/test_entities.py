@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -11,6 +13,10 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.horizoniq.button import ClearRegistrationButton
 from custom_components.horizoniq.const import DEFAULT_ENVIRONMENT, SANDBOX_ENVIRONMENT
+from custom_components.horizoniq.forecast_schema5 import (
+    Schema5Forecast,
+    parse_schema5_forecast,
+)
 from custom_components.horizoniq.models import HorizonIQSnapshot
 from custom_components.horizoniq.sensors.binary import ExportSensor, ImportSensor
 from custom_components.horizoniq.sensors.bms_state import (
@@ -20,6 +26,10 @@ from custom_components.horizoniq.sensors.cadence import ForecastCadenceSensor
 from custom_components.horizoniq.sensors.diagnostic import ForecastDetailSensor
 from custom_components.horizoniq.sensors.monetary import MonetarySensor
 from custom_components.horizoniq.sensors.trial import TrialStatusSensor
+
+
+SCHEMA5_FIXTURE = Path(__file__).with_name("fixtures") / "direct_schema5_forecast.json"
+CURRENT_PERIOD = datetime(2026, 7, 30, 12, tzinfo=timezone.utc)
 
 
 class DummyCoordinator(SimpleNamespace):
@@ -66,14 +76,169 @@ def test_monetary_sensor_exposes_value_currency_and_environment() -> None:
 
 
 def test_binary_sensors_reflect_should_import_state() -> None:
-    """Import/export entities mirror the upstream shouldImport flag."""
+    """Import stays tied to shouldImport while Export needs a schema-5 decision."""
     coordinator = _build_coordinator(data=HorizonIQSnapshot(should_import=True))
 
     import_entity = ImportSensor(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
     export_entity = ExportSensor(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
 
     assert import_entity.is_on is True
-    assert export_entity.is_on is False
+    assert export_entity.is_on is None
+
+
+def _schema5_forecast(
+    *,
+    plan_kind: str = "live",
+    enabled: bool = True,
+    should_import: bool = True,
+    recommended_action: str = "export_for_profit",
+    simulation_action: str = "none",
+    executable_action: str = "none",
+) -> Schema5Forecast:
+    """Build a complete current schema-5 plan with one controlled action."""
+    payload = json.loads(SCHEMA5_FIXTURE.read_text(encoding="utf-8"))
+    payload["planKind"] = plan_kind
+    payload["importForExportEnabled"] = enabled
+    payload["shouldImport"] = should_import
+    periods = payload["periods"]
+    assert isinstance(periods, list)
+    current = periods[0]
+    assert isinstance(current, dict)
+    current["date"] = CURRENT_PERIOD.isoformat().replace("+00:00", "Z")
+    current["shouldImport"] = should_import
+    current["recommendedAction"] = recommended_action
+    current["simulationAction"] = simulation_action
+    current["executableAction"] = executable_action
+    forecast = parse_schema5_forecast(payload)
+    assert forecast is not None
+    return forecast
+
+
+def _export_entity(
+    forecast: Schema5Forecast,
+    *,
+    entry_id: str = "entry-1",
+    now: datetime = CURRENT_PERIOD,
+    runtime: object | None = None,
+) -> ExportSensor:
+    """Create one Export entity with an explicit coordinator-owned plan."""
+    coordinator = _build_coordinator(last_forecast=forecast)
+    return ExportSensor(
+        coordinator,
+        entry_id,
+        SANDBOX_ENVIRONMENT,
+        runtime=runtime,
+        now_utc=lambda: now,
+    )
+
+
+def test_export_requires_explicit_profitable_action_and_enabled_plan() -> None:
+    """Neither import flags nor unrelated actions can turn Export on."""
+    for action in (
+        "none",
+        "use_grid",
+        "export_for_solar_headroom",
+        "charge_required",
+        "import_for_export",
+    ):
+        entity = _export_entity(_schema5_forecast(recommended_action=action))
+        assert entity.is_on is False
+
+    disabled = _export_entity(_schema5_forecast(enabled=False))
+    assert disabled.is_on is False
+
+    no_import = _export_entity(
+        _schema5_forecast(should_import=False, recommended_action="none")
+    )
+    assert no_import.is_on is False
+
+
+def test_export_uses_current_mode_action_and_has_bounded_attributes() -> None:
+    """Live/Virtual use recommendations while Replay uses simulation actions."""
+    live = _export_entity(_schema5_forecast(executable_action="none"))
+    assert live.is_on is True
+    assert live.extra_state_attributes == {
+        "environment": SANDBOX_ENVIRONMENT,
+        "plan_kind": "live",
+        "decision_source": "recommendedAction",
+        "selected_action": "export_for_profit",
+        "expected_export_kwh": 0.0,
+        "executable": False,
+    }
+
+    replay_runtime = SimpleNamespace(
+        operating_mode="replay",
+        virtual_time_utc=CURRENT_PERIOD,
+        add_listener=lambda listener: lambda: None,
+    )
+    replay = _export_entity(
+        _schema5_forecast(
+            plan_kind="sandbox_replay",
+            recommended_action="none",
+            simulation_action="export_for_profit",
+        ),
+        runtime=replay_runtime,
+    )
+    assert replay.is_on is True
+    assert replay.extra_state_attributes["decision_source"] == "simulationAction"
+
+    virtual_runtime = SimpleNamespace(
+        operating_mode="virtual",
+        virtual_time_utc=CURRENT_PERIOD,
+        add_listener=lambda listener: lambda: None,
+    )
+    virtual = _export_entity(
+        _schema5_forecast(
+            recommended_action="none",
+            simulation_action="export_for_profit",
+        ),
+        runtime=virtual_runtime,
+    )
+    assert virtual.is_on is False
+    assert virtual.extra_state_attributes["decision_source"] == "recommendedAction"
+
+    advisory = _export_entity(
+        _schema5_forecast(
+            plan_kind="import_for_export_advisory",
+            recommended_action="export_for_profit",
+        )
+    )
+    assert advisory.is_on is False
+
+
+def test_export_is_unknown_without_an_accepted_current_period() -> None:
+    """Stale, unsupported, and out-of-window plans never infer an export state."""
+    forecast = _schema5_forecast()
+    assert (
+        _export_entity(forecast, now=CURRENT_PERIOD + timedelta(minutes=60)).is_on
+        is None
+    )
+    assert _export_entity(replace(forecast, stale=True)).is_on is None
+    assert _export_entity(replace(forecast, plan_kind="unsupported")).is_on is None
+
+
+def test_export_entities_are_entry_local() -> None:
+    """Independent coordinator plans and entry clocks cannot cross-contaminate."""
+    earlier = _export_entity(
+        _schema5_forecast(recommended_action="none"),
+        entry_id="entry-earlier",
+        now=CURRENT_PERIOD,
+    )
+    profitable = _export_entity(
+        _schema5_forecast(), entry_id="entry-profitable", now=CURRENT_PERIOD
+    )
+    later = _export_entity(
+        _schema5_forecast(),
+        entry_id="entry-later",
+        now=CURRENT_PERIOD + timedelta(minutes=60),
+    )
+
+    assert (earlier.is_on, profitable.is_on, later.is_on) == (False, True, None)
+    assert {earlier.unique_id, profitable.unique_id, later.unique_id} == {
+        "horizoniq_entry-earlier_sandbox_export",
+        "horizoniq_entry-profitable_sandbox_export",
+        "horizoniq_entry-later_sandbox_export",
+    }
 
 
 def test_forecast_cadence_sensor_exposes_minutes_and_environment() -> None:
@@ -478,10 +643,12 @@ def test_default_environment_unique_ids_include_entry_id() -> None:
     )
     cadence = ForecastCadenceSensor(coordinator, "entry-1", DEFAULT_ENVIRONMENT)
     button = ClearRegistrationButton(coordinator, "entry-1", DEFAULT_ENVIRONMENT)
+    export = ExportSensor(coordinator, "entry-1", DEFAULT_ENVIRONMENT)
 
     assert sensor.unique_id == "horizoniq_entry-1_total_cost"
     assert cadence.unique_id == "horizoniq_entry-1_forecast_cadence"
     assert button.unique_id == "horizoniq_entry-1_clear_registration"
+    assert export.unique_id == "horizoniq_entry-1_export"
 
     trial = TrialStatusSensor(coordinator, "entry-1", DEFAULT_ENVIRONMENT)
     assert trial.unique_id == "horizoniq_entry-1_trial_status"
@@ -501,10 +668,12 @@ def test_default_environment_names_remain_unchanged() -> None:
     )
     cadence = ForecastCadenceSensor(coordinator, "entry-1", DEFAULT_ENVIRONMENT)
     button = ClearRegistrationButton(coordinator, "entry-1", DEFAULT_ENVIRONMENT)
+    export = ExportSensor(coordinator, "entry-1", DEFAULT_ENVIRONMENT)
 
     assert sensor.name == "HorizonIQ Total Cost"
     assert cadence.name == "HorizonIQ Forecast Cadence"
     assert button.name == "HorizonIQ Clear Registration"
+    assert export.name == "HorizonIQ Export"
 
 
 def test_sandbox_environment_names_are_prefixed() -> None:
@@ -520,10 +689,12 @@ def test_sandbox_environment_names_are_prefixed() -> None:
         value_field="total_cost",
     )
     import_sensor = ImportSensor(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
+    export_sensor = ExportSensor(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
     cadence = ForecastCadenceSensor(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
     button = ClearRegistrationButton(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
 
     assert sensor.name == "HorizonIQ Sandbox Total Cost"
     assert import_sensor.name == "HorizonIQ Sandbox Import"
+    assert export_sensor.name == "HorizonIQ Sandbox Export"
     assert cadence.name == "HorizonIQ Sandbox Forecast Cadence"
     assert button.name == "HorizonIQ Sandbox Clear Registration"
