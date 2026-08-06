@@ -2072,12 +2072,13 @@ class HorizonIQEntryRuntime:
         command_ledger = (
             ledger_from_storage(
                 record.get("accepted_command_ids"),
-                snapshot.clock_state.virtual_time_utc,
+                (
+                    self._runtime_now_utc()
+                    if operating_mode == "virtual"
+                    else snapshot.clock_state.virtual_time_utc
+                ),
             )
-            if (
-                operating_mode == "replay"
-                and storage_schema in {6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}
-            )
+            if storage_schema in {6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}
             else ()
         )
         return (
@@ -2423,7 +2424,28 @@ class HorizonIQEntryRuntime:
             return
         self._clock.step(seconds)
         await self._async_refresh_direct_forecast()
-        await self._async_simulate(seconds, hass=self._hass)
+        if self._operating_mode == "virtual":
+            if (
+                self._pending_command is not None
+                and self._clock.state.virtual_time_utc
+                >= self._pending_command.expires_at_utc
+            ):
+                await self._async_finish_pending_command(
+                    CommandLifecycleState.EXPIRED,
+                    "Issued command expired before correlation completed.",
+                )
+            # Manual stepping is not exposed in Virtual mode, but retaining a
+            # deterministic internal step is useful for lifecycle callers.
+            # Its interval must end at the stepped snapshot clock so expiry
+            # boundaries are still evaluated even though runtime time remains
+            # wall UTC.
+            await self._async_simulate_virtual_elapsed(
+                seconds,
+                self._clock.state.virtual_time_utc,
+                hass=self._hass,
+            )
+        else:
+            await self._async_simulate(seconds, hass=self._hass)
         if self._replay_session is not None and self._replay_session.state in {
             ReplayState.RUNNING,
             ReplayState.PAUSED,

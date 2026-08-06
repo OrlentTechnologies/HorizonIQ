@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
@@ -476,21 +477,32 @@ class TestRecorderForecastAttributes:
             attributes,
             state_info={"unrecorded_attributes": entity._unrecorded_attributes},
         )
-        await hass.async_block_till_done()
-        await recorder_mock.async_block_till_done()
-
         live_state = hass.states.get(entity_id)
         assert live_state is not None
         assert len(live_state.attributes["forecast"]["periods"]) == 48
+
+        # Recorder owns a separate worker queue.  On slower CI runners it can
+        # begin processing the state-changed event just after the first drain,
+        # so wait for the observable database result rather than a scheduler
+        # timing boundary.
+        recorded_state = None
+        for _ in range(100):
+            await hass.async_block_till_done()
+            await recorder_mock.async_block_till_done()
+            with recorder_mock.get_session() as session:
+                recorded_state = (
+                    session.query(States)
+                    .join(StatesMeta, States.metadata_id == StatesMeta.metadata_id)
+                    .filter(StatesMeta.entity_id == entity_id)
+                    .order_by(States.state_id.desc())
+                    .first()
+                )
+            if recorded_state is not None:
+                break
+            await asyncio.sleep(0.01)
+
+        assert recorded_state is not None
         with recorder_mock.get_session() as session:
-            recorded_state = (
-                session.query(States)
-                .join(StatesMeta, States.metadata_id == StatesMeta.metadata_id)
-                .filter(StatesMeta.entity_id == entity_id)
-                .order_by(States.state_id.desc())
-                .first()
-            )
-            assert recorded_state is not None
             assert recorded_state.attributes_id is not None
             recorded_attributes = session.get(
                 StateAttributes, recorded_state.attributes_id

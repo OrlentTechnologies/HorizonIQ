@@ -35,6 +35,7 @@ from custom_components.horizoniq.simulation.topics import (
 
 
 UTC = timezone.utc
+NOW = datetime(2026, 8, 6, 12, tzinfo=UTC)
 REGISTRATIONS = (
     "11111111-1111-4111-8111-111111111111",
     "22222222-2222-4222-8222-222222222222",
@@ -64,6 +65,7 @@ def _runtime(entry_id: str, registration_id: str) -> HorizonIQEntryRuntime:
             },
         }
     )
+    runtime._live_forecast_now = lambda: NOW
     return runtime
 
 
@@ -159,6 +161,9 @@ async def test_simulator_state_mapping_and_diagnostic_only_reason(hass) -> None:
     assert unhealthy.state is SimulatorStatusState.UNHEALTHY
     assert unhealthy.reason == "Synthetic energy balance is unhealthy."
     runtime.last_health = SimulationHealth.HEALTHY
+    assert runtime._build_simulator_status().state is SimulatorStatusState.RUNNING
+    await runtime.async_select_operating_mode("replay")
+    await _enable(hass, runtime)
     assert runtime._clock is not None
     runtime._clock.set_rate(ClockRate.PAUSED)
     assert runtime._build_simulator_status().state is SimulatorStatusState.PAUSED

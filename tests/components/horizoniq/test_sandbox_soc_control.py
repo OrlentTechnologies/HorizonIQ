@@ -113,6 +113,7 @@ def _assert_virtual_entities_are_available(hass, entry_id: str) -> None:
         ),
     }
     replay_only = {
+        ("sensor", "clock"),
         ("switch", "profile_playback"),
         ("select", "clock_rate"),
         ("select", "profile"),
@@ -203,6 +204,9 @@ async def test_service_and_number_update_paused_virtual_battery_entities(hass) -
 
         await hass.services.async_call("switch", "turn_on", {"entity_id": switch}, blocking=True)
         assert runtime.clock_rate == ClockRate.PAUSED.value
+        frozen_now = runtime.virtual_time_utc
+        assert frozen_now is not None
+        runtime._live_forecast_now = lambda: frozen_now
         time_before = runtime.virtual_time_utc
         number_state = hass.states.get(number)
         assert number_state.attributes["mode"] == "box"

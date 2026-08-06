@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -35,6 +36,7 @@ from custom_components.horizoniq.simulation.topics import (
 
 REGISTRATION_A = "11111111-1111-4111-8111-111111111111"
 REGISTRATION_B = "22222222-2222-4222-8222-222222222222"
+NOW = datetime(2026, 8, 6, 12, tzinfo=timezone.utc)
 
 
 def _runtime(entry_id: str, registration_id: str) -> HorizonIQEntryRuntime:
@@ -60,6 +62,7 @@ def _runtime(entry_id: str, registration_id: str) -> HorizonIQEntryRuntime:
             },
         }
     )
+    runtime._live_forecast_now = lambda: NOW
     return runtime
 
 
