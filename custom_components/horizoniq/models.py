@@ -95,6 +95,7 @@ class DirectForecastPeriod:
     expected_start_soc_kwh: float | None
     expected_end_soc_kwh: float | None
     decision_trace: dict[str, object] | None
+    should_export: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +112,7 @@ class Forecast:
     registration_data: str
     forecast_cadence_minutes: int
     periods: tuple[DirectForecastPeriod, ...]
+    should_export: bool | None = None
 
 
 class ForecastPeriod(TypedDict, total=False):
@@ -121,6 +123,7 @@ class ForecastPeriod(TypedDict, total=False):
     date: str
     price: float
     should_import: bool
+    should_export: bool | None
     amount: float
     imported: float
     exported: float
@@ -159,6 +162,7 @@ class ForecastData(TypedDict, total=False):
     medium_price: float
     battery_management_system_state: str
     should_import: bool
+    should_export: bool | None
     cloud_update_enabled: bool
     currency: str
     registration_data: str
@@ -217,6 +221,7 @@ class HorizonIQSnapshot:
     currency: str | None = None
     target_capacity: float | None = None
     should_import: bool | None = None
+    should_export: bool | None = None
     total_cost: float | None = None
     charging_cost: float | None = None
     saving: float | None = None

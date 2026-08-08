@@ -98,6 +98,13 @@ def normalize_periods(payload: Mapping[str, object] | None) -> list[ForecastPeri
         )
         _add_if_value(
             period,
+            "should_export",
+            _coerce_bool(
+                extract_first(item, ("ShouldExport", "shouldExport", "should_export"))
+            ),
+        )
+        _add_if_value(
+            period,
             "amount",
             _coerce_float(extract_first(item, ("Amount", "amount"))),
         )
@@ -323,6 +330,16 @@ def normalize_forecast(
     )
     _add_if_value(
         normalized,
+        "should_export",
+        _coerce_bool(
+            extract_first(
+                forecast_source,
+                ("ShouldExport", "shouldExport", "should_export"),
+            )
+        ),
+    )
+    _add_if_value(
+        normalized,
         "cloud_update_enabled",
         _coerce_bool(
             extract_first(
@@ -410,6 +427,7 @@ def normalize_direct_forecast(forecast: ForecastData) -> Forecast | None:
                 forecast["forecast_cadence_minutes"], "forecast_cadence_minutes"
             ),
             periods=periods,
+            should_export=_direct_optional_bool(forecast.get("should_export")),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -507,6 +525,7 @@ def _normalize_direct_period(source: ForecastPeriod) -> DirectForecastPeriod:
             if isinstance(source.get("decision_trace"), Mapping)
             else None
         ),
+        should_export=_direct_optional_bool(source.get("should_export")),
     )
 
 
@@ -528,6 +547,14 @@ def _direct_int(value: object, name: str) -> int:
 
 def _direct_optional_int(value: object) -> int | None:
     return _direct_int(value, "value") if value is not None else None
+
+
+def _direct_optional_bool(value: object) -> bool | None:
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ValueError("value")
+    return value
 
 
 def _direct_float(value: object, name: str) -> float:
@@ -659,6 +686,11 @@ def build_snapshot(payload: Mapping[str, object] | None) -> HorizonIQSnapshot:
     )
     if should_import is None:
         should_import = forecast.get("should_import")
+    should_export = _coerce_bool(
+        extract_first(payload, ("ShouldExport", "shouldExport", "should_export"))
+    )
+    if should_export is None:
+        should_export = forecast.get("should_export")
     total_cost = _coerce_float(
         extract_first(payload, ("TotalCost", "totalCost", "total_cost"))
     )
@@ -712,6 +744,7 @@ def build_snapshot(payload: Mapping[str, object] | None) -> HorizonIQSnapshot:
     _add_if_value(forecast, "hash", forecast_hash)
     _add_if_value(forecast, "registration_data", registration_data)
     _add_if_value(forecast, "should_import", should_import)
+    _add_if_value(forecast, "should_export", should_export)
     _add_if_value(forecast, "total_cost", total_cost)
     _add_if_value(forecast, "charging_cost", charging_cost)
     _add_if_value(forecast, "saving", saving)
@@ -734,6 +767,7 @@ def build_snapshot(payload: Mapping[str, object] | None) -> HorizonIQSnapshot:
         currency=currency,
         target_capacity=target_capacity,
         should_import=should_import,
+        should_export=should_export,
         total_cost=total_cost,
         charging_cost=charging_cost,
         saving=saving,
@@ -763,6 +797,7 @@ def _schema5_snapshot(
         currency=None,
         target_capacity=schema5_forecast.target_capacity,
         should_import=schema5_forecast.should_import,
+        should_export=schema5_forecast.should_export,
         total_cost=schema5_forecast.total_cost,
         charging_cost=schema5_forecast.charging_cost,
         saving=schema5_forecast.saving,

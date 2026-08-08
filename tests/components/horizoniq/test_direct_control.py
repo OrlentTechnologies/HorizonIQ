@@ -126,6 +126,25 @@ def test_complete_schema5_fixture_normalizes_and_drives_direct_charge() -> None:
     assert command.command.requested_grid_power_w == 2_000
 
 
+def test_schema6_forecast_normalizes_without_export_control_side_effects() -> None:
+    """The returned planning flag does not alter direct live control."""
+    payload = _fixture_payload()
+    payload["schemaVersion"] = 6
+    payload["shouldExport"] = False
+    periods = payload["periods"]
+    assert isinstance(periods, list)
+    for period in periods:
+        assert isinstance(period, dict)
+        period["shouldExport"] = False
+
+    forecast = _coordinator_forecast(payload)
+    command = parse_live_command(forecast, now_utc=NOW, config=CONFIG)
+
+    assert forecast is not None and forecast.should_export is False
+    assert command.action == "charge_required"
+    assert command.command.requested_grid_power_w == 2_000
+
+
 def test_live_none_with_null_command_metadata_is_safe_self_consumption() -> None:
     """Keep the complete contract's null command metadata non-commanding."""
     payload = _fixture_payload()

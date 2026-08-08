@@ -1,4 +1,4 @@
-"""Strict, entry-local HorizonIQ schema-5 forecast diagnostics models."""
+"""Strict, entry-local HorizonIQ schema-5/6 forecast diagnostics models."""
 
 from __future__ import annotations
 
@@ -9,7 +9,9 @@ from datetime import datetime, timedelta, timezone
 import math
 
 
-SCHEMA_VERSION = 5
+LEGACY_SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+SUPPORTED_SCHEMA_VERSIONS = frozenset({LEGACY_SCHEMA_VERSION, SCHEMA_VERSION})
 PLAN_KINDS = frozenset({"live", "import_for_export_advisory", "sandbox_replay"})
 SCHEMA5_PERIOD_DURATION = timedelta(minutes=30)
 REASON_CODES = frozenset(
@@ -66,7 +68,7 @@ _NORMALIZED_PROHIBITED_DIAGNOSTIC_KEYS = frozenset(
 
 
 class Schema5ForecastError(ValueError):
-    """Raised when a schema-5 forecast is incomplete or malformed."""
+    """Raised when a schema-5/6 forecast is incomplete or malformed."""
 
 
 def adapt_schema5_wire(payload: Mapping[str, object]) -> dict[str, object] | None:
@@ -158,6 +160,7 @@ _FORECAST_FIELDS = (
     "batteryManagementSystemState",
     "shouldImport",
     "shouldUseGrid",
+    "shouldExport",
     "forecastCadenceMinutes",
     "totalCost",
     "chargingCost",
@@ -189,7 +192,7 @@ _CONTROL_FIELDS = (
     "solarHeadroomExport",
 )
 _PERIOD_FIELDS = (
-    "period", "date", "price", "shouldImport", "shouldUseGrid",
+    "period", "date", "price", "shouldImport", "shouldUseGrid", "shouldExport",
     "recommendedAction", "simulationAction", "executableAction", "commandId",
     "issuedAtUtc", "expiresAtUtc", "actionPriority", "expectedImport",
     "expectedExport", "expectedStartSoc", "expectedEndSoc", "expectedCost",
@@ -301,13 +304,14 @@ class Schema5DecisionTrace:
 
 @dataclass(frozen=True, slots=True)
 class Schema5Period:
-    """One complete schema-5 forecast period."""
+    """One complete schema-5/6 forecast period."""
 
     period: int
     date: str
     price: float
     should_import: bool
     should_use_grid: bool
+    should_export: bool | None
     recommended_action: str
     simulation_action: str
     executable_action: str
@@ -339,6 +343,7 @@ class Schema5Period:
             "price": self.price,
             "shouldImport": self.should_import,
             "shouldUseGrid": self.should_use_grid,
+            "shouldExport": self.should_export,
             "recommendedAction": self.recommended_action,
             "simulationAction": self.simulation_action,
             "executableAction": self.executable_action,
@@ -366,7 +371,7 @@ class Schema5Period:
 
 @dataclass(frozen=True, slots=True)
 class Schema5Forecast:
-    """Complete normalized schema-5 plan retained only in entry-local memory."""
+    """Complete normalized schema-5/6 plan retained only in entry-local memory."""
 
     schema_version: int
     plan_id: str
@@ -386,6 +391,7 @@ class Schema5Forecast:
     battery_management_system_state: str | int
     should_import: bool
     should_use_grid: bool
+    should_export: bool | None
     forecast_cadence_minutes: int | None
     total_cost: float
     charging_cost: float
@@ -418,6 +424,7 @@ class Schema5Forecast:
             "batteryManagementSystemState": self.battery_management_system_state,
             "shouldImport": self.should_import,
             "shouldUseGrid": self.should_use_grid,
+            "shouldExport": self.should_export,
             "forecastCadenceMinutes": self.forecast_cadence_minutes,
             "totalCost": self.total_cost,
             "chargingCost": self.charging_cost,
@@ -438,7 +445,7 @@ def select_current_schema5_period(
     """
     if (
         not isinstance(forecast, Schema5Forecast)
-        or forecast.schema_version != SCHEMA_VERSION
+        or forecast.schema_version not in SUPPORTED_SCHEMA_VERSIONS
         or forecast.stale
         or forecast.plan_kind not in PLAN_KINDS
         or now_utc is None
@@ -462,17 +469,18 @@ def select_current_schema5_period(
 
 
 def parse_schema5_forecast(payload: Mapping[str, object]) -> Schema5Forecast | None:
-    """Parse a complete schema-5 forecast or reject it before any state changes."""
+    """Parse a complete schema-5/6 forecast or reject it before state changes."""
     source = adapt_schema5_wire(payload)
     if source is None:
         return None
-    if _integer(source, "schemaVersion") != SCHEMA_VERSION:
+    schema_version = _integer(source, "schemaVersion")
+    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
         raise Schema5ForecastError("Unsupported forecast schemaVersion")
 
     periods_value = source.get("periods")
     if not isinstance(periods_value, list):
         raise Schema5ForecastError("periods must be a list")
-    periods = tuple(_period(item) for item in periods_value)
+    periods = tuple(_period(item, schema_version=schema_version) for item in periods_value)
     economics_assumptions = _complete_object(
         source, "economicsAssumptions", _ECONOMICS_FIELDS
     )
@@ -486,8 +494,16 @@ def parse_schema5_forecast(payload: Mapping[str, object]) -> Schema5Forecast | N
         equipment_profile["supportedControl"] = _complete_object(
             equipment_profile, "supportedControl", _CONTROL_FIELDS
         )
+    should_import = _boolean(source, "shouldImport")
+    should_export = _should_export(source, schema_version=schema_version)
+    if should_import and should_export is True:
+        raise Schema5ForecastError("shouldImport and shouldExport cannot both be true")
+    if any(
+        period.should_import and period.should_export is True for period in periods
+    ):
+        raise Schema5ForecastError("shouldImport and shouldExport cannot both be true")
     return Schema5Forecast(
-        schema_version=SCHEMA_VERSION,
+        schema_version=schema_version,
         plan_id=_text(source, "planId"),
         plan_kind=_choice(source, "planKind", PLAN_KINDS),
         import_for_export_enabled=_boolean(source, "importForExportEnabled"),
@@ -505,8 +521,9 @@ def parse_schema5_forecast(payload: Mapping[str, object]) -> Schema5Forecast | N
         low_price=_number(source, "lowPrice"),
         medium_price=_number(source, "mediumPrice"),
         battery_management_system_state=_bms_state(source, "batteryManagementSystemState"),
-        should_import=_boolean(source, "shouldImport"),
+        should_import=should_import,
         should_use_grid=_boolean(source, "shouldUseGrid"),
+        should_export=should_export,
         forecast_cadence_minutes=_optional_positive_integer(
             source, "forecastCadenceMinutes"
         ),
@@ -560,7 +577,7 @@ def _has_periods_alias(source: Mapping[str, object]) -> bool:
     )
 
 
-def _period(value: object) -> Schema5Period:
+def _period(value: object, *, schema_version: int) -> Schema5Period:
     if not isinstance(value, Mapping):
         raise Schema5ForecastError("period must be an object")
     return Schema5Period(
@@ -569,6 +586,7 @@ def _period(value: object) -> Schema5Period:
         price=_number(value, "price"),
         should_import=_boolean(value, "shouldImport"),
         should_use_grid=_boolean(value, "shouldUseGrid"),
+        should_export=_should_export(value, schema_version=schema_version),
         recommended_action=_text(value, "recommendedAction"),
         simulation_action=_text(value, "simulationAction"),
         executable_action=_text(value, "executableAction"),
@@ -751,6 +769,15 @@ def _boolean(source: Mapping[str, object], key: str) -> bool:
     if not isinstance(value, bool):
         raise Schema5ForecastError(f"{key} must be boolean")
     return value
+
+
+def _should_export(
+    source: Mapping[str, object], *, schema_version: int
+) -> bool | None:
+    """Read the backend-owned export decision without locally inferring one."""
+    if schema_version == LEGACY_SCHEMA_VERSION:
+        return None
+    return _boolean(source, "shouldExport")
 
 
 def _choice(source: Mapping[str, object], key: str, choices: frozenset[str]) -> str:

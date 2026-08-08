@@ -88,20 +88,28 @@ def test_binary_sensors_reflect_should_import_state() -> None:
 
 def _schema5_forecast(
     *,
+    schema_version: int = 5,
     plan_kind: str = "live",
     enabled: bool = True,
     should_import: bool = True,
+    should_export: bool = False,
     recommended_action: str = "export_for_profit",
     simulation_action: str = "none",
     executable_action: str = "none",
 ) -> Schema5Forecast:
     """Build a complete current schema-5 plan with one controlled action."""
     payload = json.loads(SCHEMA5_FIXTURE.read_text(encoding="utf-8"))
+    payload["schemaVersion"] = schema_version
     payload["planKind"] = plan_kind
     payload["importForExportEnabled"] = enabled
     payload["shouldImport"] = should_import
     periods = payload["periods"]
     assert isinstance(periods, list)
+    if schema_version == 6:
+        payload["shouldExport"] = should_export
+        for period in periods:
+            assert isinstance(period, dict)
+            period["shouldExport"] = should_export
     current = periods[0]
     assert isinstance(current, dict)
     current["date"] = CURRENT_PERIOD.isoformat().replace("+00:00", "Z")
@@ -132,36 +140,48 @@ def _export_entity(
     )
 
 
-def test_export_requires_explicit_profitable_action_and_enabled_plan() -> None:
-    """Neither import flags nor unrelated actions can turn Export on."""
-    for action in (
-        "none",
-        "use_grid",
-        "export_for_solar_headroom",
-        "charge_required",
-        "import_for_export",
-    ):
-        entity = _export_entity(_schema5_forecast(recommended_action=action))
-        assert entity.is_on is False
-
-    disabled = _export_entity(_schema5_forecast(enabled=False))
-    assert disabled.is_on is False
-
-    no_import = _export_entity(
-        _schema5_forecast(should_import=False, recommended_action="none")
+def test_export_mirrors_backend_should_export_without_action_inference() -> None:
+    """Only schema-6 shouldExport controls Export's state."""
+    enabled = _export_entity(
+        _schema5_forecast(
+            schema_version=6,
+            should_import=False,
+            should_export=True,
+            recommended_action="none",
+        )
     )
-    assert no_import.is_on is False
+    action_only = _export_entity(
+        _schema5_forecast(
+            schema_version=6,
+            should_import=False,
+            should_export=False,
+            recommended_action="export_for_profit",
+        )
+    )
+    legacy = _export_entity(
+        _schema5_forecast(recommended_action="export_for_profit")
+    )
+
+    assert enabled.is_on is True
+    assert action_only.is_on is False
+    assert legacy.is_on is None
 
 
-def test_export_uses_current_mode_action_and_has_bounded_attributes() -> None:
-    """Live/Virtual use recommendations while Replay uses simulation actions."""
-    live = _export_entity(_schema5_forecast(executable_action="none"))
+def test_export_reads_backend_boolean_and_has_bounded_attributes() -> None:
+    """Live and Replay expose the returned boolean without issuing a command."""
+    live = _export_entity(
+        _schema5_forecast(
+            schema_version=6,
+            should_import=False,
+            should_export=True,
+            executable_action="none",
+        )
+    )
     assert live.is_on is True
     assert live.extra_state_attributes == {
         "environment": SANDBOX_ENVIRONMENT,
         "plan_kind": "live",
-        "decision_source": "recommendedAction",
-        "selected_action": "export_for_profit",
+        "current_action": "export_for_profit",
         "expected_export_kwh": 0.0,
         "executable": False,
     }
@@ -173,14 +193,17 @@ def test_export_uses_current_mode_action_and_has_bounded_attributes() -> None:
     )
     replay = _export_entity(
         _schema5_forecast(
+            schema_version=6,
             plan_kind="sandbox_replay",
+            should_import=False,
+            should_export=True,
             recommended_action="none",
-            simulation_action="export_for_profit",
+            simulation_action="none",
         ),
         runtime=replay_runtime,
     )
     assert replay.is_on is True
-    assert replay.extra_state_attributes["decision_source"] == "simulationAction"
+    assert replay.extra_state_attributes["current_action"] == "none"
 
     virtual_runtime = SimpleNamespace(
         operating_mode="virtual",
@@ -189,17 +212,23 @@ def test_export_uses_current_mode_action_and_has_bounded_attributes() -> None:
     )
     virtual = _export_entity(
         _schema5_forecast(
+            schema_version=6,
+            should_import=False,
+            should_export=False,
             recommended_action="none",
             simulation_action="export_for_profit",
         ),
         runtime=virtual_runtime,
     )
     assert virtual.is_on is False
-    assert virtual.extra_state_attributes["decision_source"] == "recommendedAction"
+    assert virtual.extra_state_attributes["current_action"] == "none"
 
     advisory = _export_entity(
         _schema5_forecast(
+            schema_version=6,
             plan_kind="import_for_export_advisory",
+            should_import=False,
+            should_export=False,
             recommended_action="export_for_profit",
         )
     )
@@ -208,7 +237,7 @@ def test_export_uses_current_mode_action_and_has_bounded_attributes() -> None:
 
 def test_export_is_unknown_without_an_accepted_current_period() -> None:
     """Stale, unsupported, and out-of-window plans never infer an export state."""
-    forecast = _schema5_forecast()
+    forecast = _schema5_forecast(schema_version=6, should_import=False)
     assert (
         _export_entity(forecast, now=CURRENT_PERIOD + timedelta(minutes=60)).is_on
         is None
@@ -220,15 +249,30 @@ def test_export_is_unknown_without_an_accepted_current_period() -> None:
 def test_export_entities_are_entry_local() -> None:
     """Independent coordinator plans and entry clocks cannot cross-contaminate."""
     earlier = _export_entity(
-        _schema5_forecast(recommended_action="none"),
+        _schema5_forecast(
+            schema_version=6,
+            should_import=False,
+            should_export=False,
+            recommended_action="none",
+        ),
         entry_id="entry-earlier",
         now=CURRENT_PERIOD,
     )
     profitable = _export_entity(
-        _schema5_forecast(), entry_id="entry-profitable", now=CURRENT_PERIOD
+        _schema5_forecast(
+            schema_version=6,
+            should_import=False,
+            should_export=True,
+        ),
+        entry_id="entry-profitable",
+        now=CURRENT_PERIOD,
     )
     later = _export_entity(
-        _schema5_forecast(),
+        _schema5_forecast(
+            schema_version=6,
+            should_import=False,
+            should_export=True,
+        ),
         entry_id="entry-later",
         now=CURRENT_PERIOD + timedelta(minutes=60),
     )

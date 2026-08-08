@@ -63,14 +63,12 @@ These are available in `Add Integration` and in `Configure` for existing entries
 
 Behavior:
 - `Import` is on when API response contains `shouldImport = true`.
-- `Export` is on only for the current schema-5 half-hour period when the
-  authoritative action is `export_for_profit` and import-for-export is enabled.
-  Live and Virtual use `recommendedAction`; Replay uses `simulationAction`.
-  It is off for advisory plans and all other actions, including
-  `export_for_solar_headroom`, and is unknown when no accepted current period
-  is available. Its bounded attributes identify the plan/action source,
-  selected action, expected export kWh, and whether the executable action is
-  also `export_for_profit`.
+- `Export` mirrors the backend's current-period `shouldExport` decision. It is
+  unknown for schema-5 forecasts, which did not provide that value, and never
+  infers export from `shouldImport`, actions, energy, or power. Its bounded
+  attributes identify the plan kind, current action, expected export kWh, and
+  whether that action is executable. This planning signal never controls the
+  virtual battery.
 
 ### Sensors
 
@@ -84,7 +82,7 @@ Behavior:
 Behavior:
 - Monetary sensors read values from API payload keys like `TotalCost`, `ChargingCost`, `Saving`.
 - Currency is taken from API (`currency`, `Currency`, etc.) when present.
-- Forecast Diagnostics state is the number of forecast periods. Its recorded attributes are a bounded health, action, timestamp, reason, and error summary; its complete normalized schema-5 horizon is exposed through Home Assistant's unrecorded-attributes support. The full horizon never includes requests, registration data, credentials, function keys, or headers.
+- Forecast Diagnostics state is the number of forecast periods. Its recorded attributes are a bounded health, action, timestamp, reason, and error summary; its complete normalized schema-5/6 horizon is exposed through Home Assistant's unrecorded-attributes support. The full horizon never includes requests, registration data, credentials, function keys, or headers.
 - BMS State is derived from top-level forecast state, otherwise current/upcoming period state.
 - Trial Status reads app-trial fields like `hasTrial`, `isActive`, `isEligible`, `status`, `startsOnUtc`, `expiresOnUtc`, and `deviceDisplayName`. If the forecast endpoint returns HTTP 401, the integration still loads and the sensor shows `unauthorized` with authorization diagnostics.
 
@@ -103,7 +101,7 @@ Sandbox entries configured with **Virtual battery** create one isolated HorizonI
 
 Operational controls and readings are unavailable when the Sandbox simulation is disabled. The device status and enable switch remain visible. Each Sandbox entry has its own generated GX ID, virtual clock, storage, MQTT subscriptions, profiles, snapshots, and faults; enabling or resetting one does not alter another.
 
-Use the `horizoniq` services for deterministic automation: `load_profile`, `start_profile`, `pause_profile`, `stop_profile`, `reset_profile`, `step`, `reset`, `set_virtual_battery_state_of_charge`, `snapshot_create`, `snapshot_list`, `get_sandbox_forecast_diagnostics`, `snapshot_restore`, `snapshot_delete`, and the `fault_*` services. `get_sandbox_forecast_diagnostics` returns the complete in-memory normalized schema-5 horizon for exactly one Sandbox entry and does not require simulation to be active. The state-of-charge service requires one active sandbox `entry_id` and a finite `state_of_charge` percentage. It rejects values below reserve, values above 100%, and playback/replay. Every service rejects Live/non-virtual entries.
+Use the `horizoniq` services for deterministic automation: `load_profile`, `start_profile`, `pause_profile`, `stop_profile`, `reset_profile`, `step`, `reset`, `set_virtual_battery_state_of_charge`, `snapshot_create`, `snapshot_list`, `get_sandbox_forecast_diagnostics`, `snapshot_restore`, `snapshot_delete`, and the `fault_*` services. `get_sandbox_forecast_diagnostics` returns the complete in-memory normalized schema-5/6 horizon for exactly one Sandbox entry and does not require simulation to be active. The state-of-charge service requires one active sandbox `entry_id` and a finite `state_of_charge` percentage. It rejects values below reserve, values above 100%, and playback/replay. Every service rejects Live/non-virtual entries.
 
 Replay profiles belong in `<HA config>/horizoniq/profiles/<config_entry_id>/`. JSON and CSV are validated before selection; they are synthetic only and capped at 31 days of five-minute samples. Snapshots are local to the entry and preserve virtual battery/clock, profile cursor, command state, including the local signed manual energy adjustment ledger, and faults. They never contain credentials, broker configuration, or production identities.
 

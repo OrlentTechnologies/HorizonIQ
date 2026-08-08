@@ -9,12 +9,15 @@ import math
 from typing import Mapping
 from uuid import UUID
 
-from .forecast_schema5 import Schema5ForecastError, parse_schema5_forecast
+from .forecast_schema5 import (
+    SUPPORTED_SCHEMA_VERSIONS,
+    Schema5ForecastError,
+    parse_schema5_forecast,
+)
 from .models import DirectEquipmentProfile, DirectForecastPeriod, Forecast
 from .simulation.models import BatteryConfig, Command, OperatingMode
 
 
-_SCHEMA_VERSION = 5
 _LIVE_PLAN_KIND = "live"
 _REPLAY_PLAN_KIND = "sandbox_replay"
 _HALF_HOUR = timedelta(minutes=30)
@@ -184,7 +187,7 @@ def _rejection_code(message: str) -> DirectForecastRejection:
 
 
 def _validate_live_forecast(forecast: Forecast) -> None:
-    if forecast.schema_version != _SCHEMA_VERSION:
+    if forecast.schema_version not in SUPPORTED_SCHEMA_VERSIONS:
         raise ValueError("Forecast schema is unsupported")
     if forecast.plan_kind != _LIVE_PLAN_KIND:
         raise ValueError("Forecast plan kind is invalid")
@@ -336,7 +339,10 @@ def parse_replay_command(
 def _validate_plan(
     payload: Mapping[str, object], *, expected_kind: str
 ) -> tuple[str, Mapping[str, object]]:
-    if _integer(payload.get("schemaVersion"), "schemaVersion") != _SCHEMA_VERSION:
+    if (
+        _integer(payload.get("schemaVersion"), "schemaVersion")
+        not in SUPPORTED_SCHEMA_VERSIONS
+    ):
         raise ValueError("Forecast schema is unsupported")
     if _text(payload.get("planKind"), "planKind") != expected_kind:
         raise ValueError("Forecast plan kind is invalid")
@@ -457,7 +463,7 @@ def _command_from_action(
 
 
 def _canonical_contract(payload: Mapping[str, object]) -> dict[str, object]:
-    """Parse the same canonical schema-5 contract used by coordinator views."""
+    """Parse the same canonical schema-5/6 contract used by coordinator views."""
     try:
         forecast = parse_schema5_forecast(payload)
     except Schema5ForecastError as err:

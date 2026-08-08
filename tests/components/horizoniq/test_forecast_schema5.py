@@ -34,6 +34,19 @@ def _payload() -> dict[str, object]:
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
 
 
+def _schema6_payload(*, should_export: bool) -> dict[str, object]:
+    """Return a complete schema-6 plan with one explicit export decision."""
+    payload = _payload()
+    payload["schemaVersion"] = 6
+    payload["shouldExport"] = should_export
+    periods = payload["periods"]
+    assert isinstance(periods, list)
+    for period in periods:
+        assert isinstance(period, dict)
+        period["shouldExport"] = should_export
+    return payload
+
+
 def _maximum_horizon_payload() -> dict[str, object]:
     """Expand the complete fixture to the production 48-period horizon."""
     payload = _payload()
@@ -81,6 +94,7 @@ def test_complete_schema5_contract_survives_strict_normalization() -> None:
     assert forecast is not None
     normalized = forecast.to_dict()
     assert normalized["schemaVersion"] == 5
+    assert normalized["shouldExport"] is None
     for field in (
         "planId",
         "planKind",
@@ -107,6 +121,7 @@ def test_complete_schema5_contract_survives_strict_normalization() -> None:
         assert normalized[field] == payload[field]
     period = normalized["periods"][0]
     source_period = payload["periods"][0]
+    assert period["shouldExport"] is None
     for field in (
         "period",
         "date",
@@ -137,6 +152,55 @@ def test_complete_schema5_contract_survives_strict_normalization() -> None:
     ):
         assert period[field] == source_period[field]
     assert period["decisionTrace"] == source_period["decisionTrace"]
+
+
+def test_schema6_requires_and_preserves_backend_should_export() -> None:
+    """Schema 6 carries the backend export decision without HA inference."""
+    payload = _schema6_payload(should_export=True)
+    payload["shouldImport"] = False
+    periods = payload["periods"]
+    assert isinstance(periods, list)
+    for period in periods:
+        assert isinstance(period, dict)
+        period["shouldImport"] = False
+
+    forecast = parse_schema5_forecast(payload)
+    snapshot = build_snapshot(payload)
+
+    assert forecast is not None
+    assert forecast.schema_version == 6
+    assert forecast.should_export is True
+    assert all(period.should_export is True for period in forecast.periods)
+    assert snapshot.should_export is True
+    assert snapshot.forecast["should_export"] is True
+    assert all(period["should_export"] is True for period in snapshot.forecast_periods)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda payload: payload.pop("shouldExport"),
+        lambda payload: payload["periods"][0].pop("shouldExport"),
+        lambda payload: payload.__setitem__("shouldExport", "true"),
+        lambda payload: payload["periods"][0].__setitem__("shouldExport", 1),
+    ),
+)
+def test_schema6_rejects_missing_or_non_boolean_should_export(mutate) -> None:
+    """Schema 6 never silently substitutes an export decision."""
+    payload = _schema6_payload(should_export=False)
+
+    mutate(payload)
+
+    with pytest.raises(Schema5ForecastError, match="shouldExport must be boolean"):
+        parse_schema5_forecast(payload)
+
+
+def test_schema6_rejects_simultaneous_import_and_export() -> None:
+    """The simple planning decisions cannot contradict each other."""
+    payload = _schema6_payload(should_export=True)
+
+    with pytest.raises(Schema5ForecastError, match="cannot both be true"):
+        parse_schema5_forecast(payload)
 
 
 @pytest.mark.parametrize("style", ("pascal", "snake"))

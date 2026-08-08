@@ -74,7 +74,7 @@ class ImportSensor(HorizonIQEntity, BinarySensorEntity):
 
 
 class ExportSensor(HorizonIQEntity, BinarySensorEntity):
-    """Expose only an explicit current-period profitable-export recommendation."""
+    """Expose the backend-owned current-period export recommendation."""
 
     def __init__(
         self,
@@ -104,32 +104,24 @@ class ExportSensor(HorizonIQEntity, BinarySensorEntity):
         period = select_current_schema5_period(forecast, self._current_time_utc())
         if forecast is None or period is None:
             return None
-        if forecast.plan_kind == "import_for_export_advisory":
-            return False
-        _, selected_action = self._decision(period, forecast)
-        return (
-            forecast.import_for_export_enabled
-            and selected_action == "export_for_profit"
-        )
+        return period.should_export
 
     @property
     def extra_state_attributes(self) -> dict[str, object]:
         """Return the bounded source evidence for the current export decision."""
         forecast = self._forecast
         period = select_current_schema5_period(forecast, self._current_time_utc())
-        decision_source: str | None = None
-        selected_action: str | None = None
+        current_action: str | None = None
         expected_export_kwh: float | None = None
         executable = False
         if forecast is not None and period is not None:
-            decision_source, selected_action = self._decision(period, forecast)
+            current_action = self._current_action(period, forecast)
             expected_export_kwh = period.expected_export
             executable = period.executable_action == "export_for_profit"
         return {
             "environment": environment_label(self._environment),
             "plan_kind": forecast.plan_kind if forecast is not None else None,
-            "decision_source": decision_source,
-            "selected_action": selected_action,
+            "current_action": current_action,
             "expected_export_kwh": expected_export_kwh,
             "executable": executable,
         }
@@ -151,20 +143,15 @@ class ExportSensor(HorizonIQEntity, BinarySensorEntity):
             return self._runtime.virtual_time_utc
         return self._now_utc()
 
-    def _decision(
+    def _current_action(
         self,
         period: Schema5Period,
         forecast: Schema5Forecast,
-    ) -> tuple[str, str]:
-        """Select the contract action source for this entry's active mode."""
-        replay = (
-            self._runtime.operating_mode == "replay"
-            if self._runtime is not None
-            else forecast.plan_kind == "sandbox_replay"
-        )
-        if replay:
-            return "simulationAction", period.simulation_action
-        return "recommendedAction", period.recommended_action
+    ) -> str:
+        """Expose the plan's current action only as bounded diagnostics."""
+        if forecast.plan_kind == "sandbox_replay":
+            return period.simulation_action
+        return period.recommended_action
 
     async def async_will_remove_from_hass(self) -> None:
         """Release the optional entry-local runtime listener."""
