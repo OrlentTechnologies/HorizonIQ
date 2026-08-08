@@ -22,6 +22,9 @@ _LIVE_PLAN_KIND = "live"
 _REPLAY_PLAN_KIND = "sandbox_replay"
 _HALF_HOUR = timedelta(minutes=30)
 _LIVE_ACTIONS = {"charge_required", "use_grid", "import_for_export"}
+_VIRTUAL_EXPORT_ACTION = "export_for_profit"
+_VIRTUAL_RECOMMENDATIONS = _LIVE_ACTIONS | {_VIRTUAL_EXPORT_ACTION}
+_VIRTUAL_SAFE_RECOMMENDATIONS = {"none", "self_consumption"}
 _REPLAY_ACTIONS = _LIVE_ACTIONS | {
     "export_for_profit",
     "export_for_solar_headroom",
@@ -151,7 +154,11 @@ def validate_live_forecast(
     """Return a command or a bounded reason without exposing payload details."""
     try:
         return DirectForecastValidation(
-            command=parse_live_command(forecast, now_utc=now_utc, config=config)
+            command=parse_live_command(
+                forecast,
+                now_utc=now_utc,
+                config=config,
+            )
         )
     except ValueError as err:
         return DirectForecastValidation(
@@ -248,6 +255,77 @@ def _direct_capability(profile: DirectEquipmentProfile, action: str) -> bool:
     }[action]
 
 
+def parse_virtual_recommendation(
+    forecast: Forecast | None,
+    *,
+    now_utc: datetime,
+    config: BatteryConfig,
+) -> DirectCommand:
+    """Interpret an accepted generic recommendation for local virtual physics.
+
+    This deliberately does not use the production executable-action or
+    adapter-capability fields. Callers must establish Sandbox Virtual authority
+    before using this local-only interpretation.
+    """
+    if not isinstance(forecast, Forecast):
+        raise ValueError("Direct forecast model is unavailable")
+    _validate_live_forecast(forecast)
+    if forecast.created_at_utc > now_utc or forecast.effective_at_utc > now_utc:
+        raise ValueError("Forecast is stale or not yet effective")
+    period = _current_direct_period(forecast, now_utc)
+    if period.simulation_action != "none":
+        raise ValueError("Live forecast includes a simulation action")
+    _validate_direct_period_diagnostics(period)
+    action = _text(period.recommended_action, "recommendedAction")
+    expires = period.starts_at_utc + _HALF_HOUR
+    if now_utc >= expires:
+        raise ValueError("Forecast is stale or expires outside its period")
+    if period.issued_at_utc is not None or period.expires_at_utc is not None:
+        if (
+            period.issued_at_utc is None
+            or period.expires_at_utc is None
+            or not period.issued_at_utc <= now_utc < period.expires_at_utc
+            or period.expires_at_utc != expires
+        ):
+            raise ValueError("Forecast is stale or expires outside its period")
+    if action in _VIRTUAL_SAFE_RECOMMENDATIONS:
+        return DirectCommand(
+            Command(OperatingMode.SELF_CONSUMPTION), None, forecast.plan_id, action
+        )
+    if action not in _VIRTUAL_RECOMMENDATIONS:
+        raise ValueError("recommendedAction is unsupported for local virtual control")
+    command = _direct_command_from_action(
+        action=action,
+        period=period,
+        profile=forecast.equipment_profile,
+        config=config,
+        remaining_hours=(expires - now_utc).total_seconds() / 3600,
+        issued_at_utc=period.starts_at_utc,
+        expires_at_utc=expires,
+    )
+    return DirectCommand(command, None, forecast.plan_id, action)
+
+
+def validate_virtual_recommendation(
+    forecast: Forecast | None,
+    *,
+    now_utc: datetime,
+    config: BatteryConfig,
+) -> DirectForecastValidation:
+    """Return a bounded local-virtual recommendation validation outcome."""
+    try:
+        return DirectForecastValidation(
+            command=parse_virtual_recommendation(
+                forecast, now_utc=now_utc, config=config
+            )
+        )
+    except ValueError as err:
+        return DirectForecastValidation(
+            command=None,
+            rejection=_rejection_code(str(err)),
+        )
+
+
 def _direct_command_from_action(
     *,
     action: str,
@@ -261,11 +339,26 @@ def _direct_command_from_action(
     if action == "use_grid":
         return Command(OperatingMode.GRID_SETPOINT, 0.0, issued_at_utc, expires_at_utc)
     energy_kwh = _required_energy(
-        period.expected_import_kwh,
-        "expectedImport",
+        period.expected_export_kwh
+        if action == _VIRTUAL_EXPORT_ACTION
+        else period.expected_import_kwh,
+        "expectedExport" if action == _VIRTUAL_EXPORT_ACTION else "expectedImport",
     )
     if not math.isfinite(remaining_hours) or remaining_hours <= 0:
         raise ValueError("Forecast command duration is invalid")
+    if action == _VIRTUAL_EXPORT_ACTION:
+        limit = min(
+            config.max_discharge_power_w,
+            profile.maximum_battery_discharge_power_watts,
+            profile.inverter_maximum_discharge_power_watts,
+            profile.maximum_grid_export_power_watts,
+        )
+        return Command(
+            OperatingMode.GRID_SETPOINT,
+            -min(energy_kwh * 1000 / remaining_hours, limit),
+            issued_at_utc,
+            expires_at_utc,
+        )
     limit = min(
         config.max_charge_power_w,
         profile.maximum_battery_charge_power_watts,

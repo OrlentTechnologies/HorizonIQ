@@ -532,6 +532,8 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         query_params["currentBatteryCapacity"] = battery_capacity
         query_params["hash"] = self._last_hash
         query_params["registrationData"] = self._registration_data
+        query_params.pop("executionTarget", None)
+        query_params.pop("execution_target", None)
         new_query = urlencode(query_params, doseq=True)
         return urlunparse(parsed._replace(query=new_query))
 

@@ -24,6 +24,29 @@ from custom_components.horizoniq.coordinator import HorizonIQCoordinator
 from custom_components.horizoniq.models import HorizonIQSnapshot
 
 
+async def test_sandbox_forecast_request_has_no_client_control_capability(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+) -> None:
+    """The generic forecast request never declares a downstream control target."""
+    coordinator = HorizonIQCoordinator(
+        hass,
+        mock_config_entry,
+        entry_data["url"],
+        entry_data["api_key"],
+        entry_data["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+    )
+
+    assert "executionTarget=" not in coordinator._build_request_url("53")
+    coordinator._url = (
+        f"{entry_data['url']}&executionTarget=forged&execution_target=forged"
+    )
+    assert "executionTarget=" not in coordinator._build_request_url("53")
+    assert "execution_target=" not in coordinator._build_request_url("53")
+
+
 async def test_coordinator_updates_cached_values_from_api(
     hass,
     mock_config_entry,

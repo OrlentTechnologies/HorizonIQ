@@ -199,7 +199,13 @@ class SandboxRuntimeSensor(SensorEntity):
             "time_source": self._runtime.time_source,
             "charging_source": self._runtime.charging_source,
             "active_setpoint_w": _rounded_number(self._runtime.active_setpoint_w),
-            "active_action": self._runtime.last_command_reason,
+            "active_action": self._runtime.selected_direct_action,
+            "expected_import_kwh": _rounded_number(
+                self._runtime.expected_direct_import_kwh
+            ),
+            "expected_export_kwh": _rounded_number(
+                self._runtime.expected_direct_export_kwh
+            ),
             "rejection_reason": (
                 self._runtime.last_command_reason
                 if self._runtime.last_command_status.value.startswith("fallback")

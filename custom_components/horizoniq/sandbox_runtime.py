@@ -95,9 +95,9 @@ from .simulation.command_lifecycle import (
 from .direct_control import (
     DirectForecastRejection,
     parse_replay_command,
-    validate_live_forecast,
+    validate_virtual_recommendation,
 )
-from .models import Forecast
+from .models import DirectForecastPeriod, Forecast
 from .forecast_schema5 import Schema5Forecast
 from .sandbox_storage import (
     MAX_NAMED_SNAPSHOTS,
@@ -385,6 +385,7 @@ class HorizonIQEntryRuntime:
     _mqtt_emulation_enabled: bool = True
     _direct_forecast_health: str = "unavailable"
     _last_direct_command_id: str | None = None
+    _last_direct_action: str | None = None
     _staged_direct_forecast: Forecast | None = None
     _direct_forecast_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _state_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -568,6 +569,23 @@ class HorizonIQEntryRuntime:
     def decision_summary(self) -> str:
         """Return the bounded latest direct-forecast decision summary."""
         return self.last_command_reason or self.last_command_status.value
+
+    @property
+    def selected_direct_action(self) -> str | None:
+        """Return the last accepted direct action for bounded diagnostics."""
+        return self._last_direct_action
+
+    @property
+    def expected_direct_import_kwh(self) -> float | None:
+        """Return the current bounded planned import for local diagnostics."""
+        period = self._current_direct_forecast_period()
+        return period.expected_import_kwh if period is not None else None
+
+    @property
+    def expected_direct_export_kwh(self) -> float | None:
+        """Return the current bounded planned export for local diagnostics."""
+        period = self._current_direct_forecast_period()
+        return period.expected_export_kwh if period is not None else None
 
     @property
     def virtual_time_utc(self) -> datetime | None:
@@ -947,6 +965,7 @@ class HorizonIQEntryRuntime:
         self._clear_external_power()
         self._command = Command(OperatingMode.SELF_CONSUMPTION)
         self._last_direct_command_id = None
+        self._last_direct_action = None
         self.last_command_status = CommandStatus.NO_ACTION
         self.last_command_reason = "No executable action; self-consumption applied."
 
@@ -1067,6 +1086,7 @@ class HorizonIQEntryRuntime:
             if operating_mode == "virtual":
                 self._command = Command(OperatingMode.SELF_CONSUMPTION)
                 self._last_direct_command_id = None
+                self._last_direct_action = None
                 self._staged_direct_forecast = None
                 self._clear_external_power()
                 self._clear_replay_state_for_virtual()
@@ -1368,6 +1388,7 @@ class HorizonIQEntryRuntime:
         self._last_direct_replay_key = None
         self._staged_direct_forecast = None
         self._last_direct_command_id = None
+        self._last_direct_action = None
         self._direct_forecast_health = "unavailable"
         self._playback_state = "stopped"
         self.load_w = 0.0
@@ -2365,6 +2386,10 @@ class HorizonIQEntryRuntime:
         self._cancel_replay_heartbeat()
         self._cancel_virtual_schedule()
         self._clear_external_power()
+        self._command = Command(OperatingMode.SELF_CONSUMPTION)
+        self._last_direct_command_id = None
+        self._last_direct_action = None
+        self._staged_direct_forecast = None
         self._freeze_fault_durations()
         self._cancel_all_fault_work()
         self._mqtt_fault_disconnected = False
@@ -2597,6 +2622,7 @@ class HorizonIQEntryRuntime:
             # continue.  Keep the cadence-limited forecast request untouched.
             self._command = Command(OperatingMode.SELF_CONSUMPTION)
             self._last_direct_command_id = None
+            self._last_direct_action = None
             self.last_command_status = CommandStatus.AWAITING_FORECAST
             self.last_command_reason = "Awaiting scheduled forecast after manual state-of-charge change."
             self._direct_forecast_health = "awaiting_forecast"
@@ -2884,6 +2910,7 @@ class HorizonIQEntryRuntime:
         if expired_at_segment_end:
             self._command = Command(OperatingMode.SELF_CONSUMPTION)
             self._last_direct_command_id = None
+            self._last_direct_action = None
             self.last_command_status = CommandStatus.FALLBACK_EXPIRED
             self.last_command_reason = "Command expired; self-consumption used."
             self._direct_forecast_health = "awaiting_forecast"
@@ -2980,6 +3007,7 @@ class HorizonIQEntryRuntime:
                 return
             if forecast is None:
                 self._command = None
+                self._last_direct_action = None
                 self.last_command_status = CommandStatus.FALLBACK_MISSING
                 self.last_command_reason = None
                 self._direct_forecast_health = "unavailable"
@@ -2987,7 +3015,18 @@ class HorizonIQEntryRuntime:
                 self._notify_listeners()
                 return
             live_now_utc = self._runtime_now_utc()
-            validation = validate_live_forecast(
+            if self._charging_source == "external":
+                self._staged_direct_forecast = forecast
+                self._command = Command(OperatingMode.SELF_CONSUMPTION)
+                self._last_direct_command_id = None
+                self._last_direct_action = None
+                self.last_command_status = CommandStatus.NO_ACTION
+                self.last_command_reason = "Awaiting external controller"
+                self._direct_forecast_health = "healthy"
+                await self.async_checkpoint(immediate=True)
+                self._notify_listeners()
+                return
+            validation = validate_virtual_recommendation(
                 forecast,
                 now_utc=live_now_utc,
                 config=self._config,
@@ -2995,6 +3034,7 @@ class HorizonIQEntryRuntime:
             if not validation.is_valid:
                 rejection = validation.rejection or DirectForecastRejection.OTHER_INVALID
                 self._command = Command(OperatingMode.SELF_CONSUMPTION)
+                self._last_direct_action = None
                 self.last_command_status = CommandStatus.FALLBACK_INVALID
                 self.last_command_reason = f"direct_forecast:{rejection.value}"
                 self._direct_forecast_health = "failed"
@@ -3010,22 +3050,18 @@ class HorizonIQEntryRuntime:
                 direct = validation.command
                 assert direct is not None
                 self._staged_direct_forecast = forecast
-                if self._charging_source == "external":
-                    self._command = Command(OperatingMode.SELF_CONSUMPTION)
-                    self._last_direct_command_id = None
-                    self.last_command_status = CommandStatus.NO_ACTION
-                    self.last_command_reason = "Awaiting external controller"
-                    self._direct_forecast_health = "healthy"
-                    await self.async_checkpoint(immediate=True)
-                    self._notify_listeners()
-                    return
                 if direct.command_id is None:
                     self._command = direct.command
                     self._last_direct_command_id = None
-                    self.last_command_status = CommandStatus.NO_ACTION
-                    self.last_command_reason = (
-                        "No executable action; self-consumption applied."
-                    )
+                    self._last_direct_action = direct.action
+                    if direct.command.mode is OperatingMode.SELF_CONSUMPTION:
+                        self.last_command_status = CommandStatus.NO_ACTION
+                        self.last_command_reason = (
+                            "No executable action; self-consumption applied."
+                        )
+                    else:
+                        self.last_command_status = CommandStatus.APPLIED
+                        self.last_command_reason = direct.action
                     self._direct_forecast_health = "healthy"
                 elif direct.command_id == self._last_direct_command_id:
                     self._direct_forecast_health = "healthy"
@@ -3039,6 +3075,7 @@ class HorizonIQEntryRuntime:
                         and live_now_utc < self._command.expires_at_utc
                     ):
                         self._last_direct_command_id = direct.command_id
+                        self._last_direct_action = direct.action
                         self._direct_forecast_health = "healthy"
                     else:
                         raise ValueError("Forecast command is a terminal duplicate")
@@ -3052,11 +3089,13 @@ class HorizonIQEntryRuntime:
                         raise ValueError("Forecast command is a retained duplicate")
                     self._command = direct.command
                     self._last_direct_command_id = direct.command_id
+                    self._last_direct_action = direct.action
                     self.last_command_status = CommandStatus.APPLIED
                     self.last_command_reason = direct.action
                     self._direct_forecast_health = "healthy"
             except Exception as err:
                 self._command = Command(OperatingMode.SELF_CONSUMPTION)
+                self._last_direct_action = None
                 self.last_command_status = CommandStatus.FALLBACK_INVALID
                 self.last_command_reason = "Direct forecast rejected; self-consumption used."
                 self._direct_forecast_health = "failed"
@@ -3072,6 +3111,22 @@ class HorizonIQEntryRuntime:
         return any(
             period.starts_at_utc <= now_utc < period.starts_at_utc + timedelta(minutes=30)
             for period in self._staged_direct_forecast.periods
+        )
+
+    def _current_direct_forecast_period(self) -> DirectForecastPeriod | None:
+        """Return the current typed period solely for bounded diagnostics."""
+        forecast = self._staged_direct_forecast
+        if forecast is None:
+            return None
+        now_utc = self._runtime_now_utc()
+        return next(
+            (
+                period
+                for period in forecast.periods
+                if period.starts_at_utc <= now_utc
+                < period.starts_at_utc + timedelta(minutes=30)
+            ),
+            None,
         )
 
     def _logger_debug_direct_failure(self, err: Exception) -> None:
