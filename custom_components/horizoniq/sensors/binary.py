@@ -100,11 +100,10 @@ class ExportSensor(HorizonIQEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool | None:
         """Return whether export is currently recommended."""
-        forecast = self._forecast
-        period = select_current_schema5_period(forecast, self._current_time_utc())
-        if forecast is None or period is None:
+        snapshot = self.snapshot
+        if snapshot is None:
             return None
-        return period.should_export
+        return snapshot.should_export
 
     @property
     def extra_state_attributes(self) -> dict[str, object]:

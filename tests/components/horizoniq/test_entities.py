@@ -76,7 +76,7 @@ def test_monetary_sensor_exposes_value_currency_and_environment() -> None:
 
 
 def test_binary_sensors_reflect_should_import_state() -> None:
-    """Import stays tied to shouldImport while Export needs a schema-5 decision."""
+    """Import and Export each mirror their respective snapshot decisions."""
     coordinator = _build_coordinator(data=HorizonIQSnapshot(should_import=True))
 
     import_entity = ImportSensor(coordinator, "entry-1", SANDBOX_ENVIRONMENT)
@@ -130,7 +130,10 @@ def _export_entity(
     runtime: object | None = None,
 ) -> ExportSensor:
     """Create one Export entity with an explicit coordinator-owned plan."""
-    coordinator = _build_coordinator(last_forecast=forecast)
+    coordinator = _build_coordinator(
+        data=HorizonIQSnapshot(should_export=forecast.should_export),
+        last_forecast=forecast,
+    )
     return ExportSensor(
         coordinator,
         entry_id,
@@ -138,6 +141,44 @@ def _export_entity(
         runtime=runtime,
         now_utc=lambda: now,
     )
+
+
+def _live_export_entity(
+    *, should_export: bool | None, should_import: bool = False
+) -> ExportSensor:
+    """Create a Live Export entity with no optional typed diagnostics plan."""
+    coordinator = _build_coordinator(
+        data=HorizonIQSnapshot(
+            should_import=should_import,
+            should_export=should_export,
+        )
+    )
+    return ExportSensor(coordinator, "entry-live", DEFAULT_ENVIRONMENT)
+
+
+def test_live_export_mirrors_snapshot_without_typed_diagnostics() -> None:
+    """A known Live backend value is never hidden by missing diagnostics."""
+    disabled = _live_export_entity(should_export=False)
+    enabled = _live_export_entity(should_export=True)
+    unknown = _live_export_entity(should_export=None)
+
+    assert disabled.is_on is False
+    assert enabled.is_on is True
+    assert unknown.is_on is None
+    assert enabled.extra_state_attributes == {
+        "environment": "Live",
+        "plan_kind": None,
+        "current_action": None,
+        "expected_export_kwh": None,
+        "executable": False,
+    }
+
+
+def test_should_import_false_does_not_imply_export() -> None:
+    """Export follows only its backend-owned snapshot value."""
+    entity = _live_export_entity(should_export=False, should_import=False)
+
+    assert entity.is_on is False
 
 
 def test_export_mirrors_backend_should_export_without_action_inference() -> None:
@@ -235,15 +276,15 @@ def test_export_reads_backend_boolean_and_has_bounded_attributes() -> None:
     assert advisory.is_on is False
 
 
-def test_export_is_unknown_without_an_accepted_current_period() -> None:
-    """Stale, unsupported, and out-of-window plans never infer an export state."""
+def test_export_snapshot_boolean_is_not_overridden_by_optional_diagnostics() -> None:
+    """Stale, invalid, and out-of-window diagnostics cannot hide a known value."""
     forecast = _schema5_forecast(schema_version=6, should_import=False)
     assert (
         _export_entity(forecast, now=CURRENT_PERIOD + timedelta(minutes=60)).is_on
-        is None
+        is False
     )
-    assert _export_entity(replace(forecast, stale=True)).is_on is None
-    assert _export_entity(replace(forecast, plan_kind="unsupported")).is_on is None
+    assert _export_entity(replace(forecast, stale=True)).is_on is False
+    assert _export_entity(replace(forecast, plan_kind="unsupported")).is_on is False
 
 
 def test_export_entities_are_entry_local() -> None:
@@ -277,7 +318,7 @@ def test_export_entities_are_entry_local() -> None:
         now=CURRENT_PERIOD + timedelta(minutes=60),
     )
 
-    assert (earlier.is_on, profitable.is_on, later.is_on) == (False, True, None)
+    assert (earlier.is_on, profitable.is_on, later.is_on) == (False, True, True)
     assert {earlier.unique_id, profitable.unique_id, later.unique_id} == {
         "horizoniq_entry-earlier_sandbox_export",
         "horizoniq_entry-profitable_sandbox_export",
