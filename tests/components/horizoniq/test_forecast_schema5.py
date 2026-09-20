@@ -8,10 +8,12 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sqlite3
+from unittest.mock import MagicMock
 
 import pytest
 from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.core import Event, State
+from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.horizoniq.forecast_schema5 import (
     REASON_CODES,
@@ -270,15 +272,17 @@ def test_malformed_schema5_refresh_keeps_the_last_complete_plan_as_stale() -> No
     coordinator = object.__new__(HorizonIQCoordinator)
     coordinator._latest_snapshot = snapshot
     coordinator._last_valid_schema5_forecast = snapshot.schema5_forecast
+    coordinator._publish_stale_forecast = MagicMock()
 
     invalid = deepcopy(valid)
     del invalid["periods"][0]["expectedNetValue"]
-    stale = coordinator._build_snapshot_or_stale(invalid)
+    with pytest.raises(UpdateFailed, match="Malformed schema-5 forecast"):
+        coordinator._build_snapshot_or_stale(invalid)
 
-    assert stale.schema5_forecast is not None
-    assert stale.schema5_forecast.stale is True
-    assert stale.schema5_forecast.plan_id == snapshot.schema5_forecast.plan_id
-    assert stale.schema5_forecast.to_dict()["periods"] == snapshot.schema5_forecast.to_dict()[
+    coordinator._publish_stale_forecast.assert_called_once_with()
+    assert coordinator._last_valid_schema5_forecast is not None
+    assert coordinator._last_valid_schema5_forecast.plan_id == snapshot.schema5_forecast.plan_id
+    assert coordinator._last_valid_schema5_forecast.to_dict()["periods"] == snapshot.schema5_forecast.to_dict()[
         "periods"
     ]
 
@@ -294,15 +298,17 @@ def test_three_coordinators_keep_schema5_diagnostics_entry_local() -> None:
         coordinator = object.__new__(HorizonIQCoordinator)
         coordinator._latest_snapshot = snapshot
         coordinator._last_valid_schema5_forecast = snapshot.schema5_forecast
+        coordinator._publish_stale_forecast = MagicMock()
         coordinators.append(coordinator)
 
     invalid = _payload()
     del invalid["periods"][0]["decisionTrace"]["constraints"]
-    stale = coordinators[0]._build_snapshot_or_stale(invalid)
+    with pytest.raises(UpdateFailed, match="Malformed schema-5 forecast"):
+        coordinators[0]._build_snapshot_or_stale(invalid)
 
-    assert stale.schema5_forecast is not None
-    assert stale.schema5_forecast.plan_id == "plan-a"
-    assert stale.schema5_forecast.stale is True
+    coordinators[0]._publish_stale_forecast.assert_called_once_with()
+    assert coordinators[0]._last_valid_schema5_forecast is not None
+    assert coordinators[0]._last_valid_schema5_forecast.plan_id == "plan-a"
     assert [
         coordinator._last_valid_schema5_forecast.plan_id
         for coordinator in coordinators[1:]

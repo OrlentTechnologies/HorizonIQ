@@ -16,7 +16,11 @@ from custom_components.horizoniq.direct_control import (
     validate_virtual_recommendation,
 )
 from custom_components.horizoniq.coordinator_helpers import build_snapshot
-from custom_components.horizoniq.models import Forecast
+from custom_components.horizoniq.models import (
+    Forecast,
+    ForecastFreshness,
+    HorizonIQSnapshot,
+)
 from custom_components.horizoniq.sandbox_runtime import HorizonIQEntryRuntime
 from custom_components.horizoniq.sensors import SandboxRuntimeSensor
 from custom_components.horizoniq.simulation.clock import ClockRate, VirtualClock
@@ -41,6 +45,14 @@ def _fixture_payload() -> dict[str, object]:
 def _coordinator_forecast(payload: dict[str, object]) -> Forecast | None:
     """Use the production raw API → coordinator model boundary."""
     return build_snapshot(payload).direct_forecast
+
+
+def _snapshot(forecast: Forecast, sequence: int = 1) -> HorizonIQSnapshot:
+    return HorizonIQSnapshot(
+        direct_forecast=forecast,
+        forecast_freshness=ForecastFreshness.FRESH,
+        publication_sequence=sequence,
+    )
 
 
 def _profile(*, exports: bool = False) -> dict[str, object]:
@@ -263,13 +275,13 @@ async def test_virtual_import_for_export_then_profit_export_changes_soc() -> Non
     runtime._clock = VirtualClock(NOW)
     runtime._live_forecast_now = lambda: NOW
 
-    await runtime._async_stage_direct_forecast(import_forecast)
+    await runtime._async_stage_forecast_snapshot(_snapshot(import_forecast))
     energy_before_import = runtime.energy_wh
     await runtime._async_simulate(60, hass=None)
     assert runtime.energy_wh > energy_before_import
     assert runtime.selected_direct_action == "import_for_export"
 
-    await runtime._async_stage_direct_forecast(export_forecast)
+    await runtime._async_stage_forecast_snapshot(_snapshot(export_forecast, 2))
     diagnostics = SandboxRuntimeSensor(runtime, "entry-1", "decision", "Decision")
     attributes = diagnostics.extra_state_attributes
     assert attributes["active_action"] == "export_for_profit"
@@ -291,9 +303,12 @@ async def test_virtual_refresh_has_no_client_control_capability_override() -> No
     assert forecast is not None
 
     class GenericCoordinator:
-        async def async_fetch_sandbox_forecast(self) -> Forecast:
+        sequence = 0
+
+        async def async_fetch_sandbox_forecast(self) -> HorizonIQSnapshot:
             calls.append(None)
-            return forecast
+            self.sequence += 1
+            return _snapshot(forecast, self.sequence)
 
     runtime = HorizonIQEntryRuntime(GenericCoordinator(), "registration-id")
     runtime.simulator_enabled = True
@@ -336,7 +351,7 @@ async def test_unload_cancels_only_its_local_virtual_recommendation() -> None:
         runtime._state = BatteryState(5_000)
         runtime._clock = VirtualClock(NOW)
         runtime._live_forecast_now = lambda: NOW
-        await runtime._async_stage_direct_forecast(forecast)
+        await runtime._async_stage_forecast_snapshot(_snapshot(forecast))
 
     await first.async_unload()
 
@@ -352,10 +367,95 @@ async def test_unload_cancels_only_its_local_virtual_recommendation() -> None:
     reloaded._state = BatteryState(5_000)
     reloaded._clock = VirtualClock(NOW)
     reloaded._live_forecast_now = lambda: NOW
-    await reloaded._async_stage_direct_forecast(forecast)
+    await reloaded._async_stage_forecast_snapshot(_snapshot(forecast))
 
     assert reloaded.selected_direct_action == "import_for_export"
     assert second.selected_direct_action == "import_for_export"
+
+
+@pytest.mark.asyncio
+async def test_runtime_maps_explicit_stale_snapshot_to_fallback_stale_not_missing() -> None:
+    """A stale diagnostic update clears virtual control without changing the ledger."""
+    runtime = HorizonIQEntryRuntime(SimpleNamespace(), "stale-registration")
+    runtime.simulator_enabled = True
+    runtime._config = CONFIG
+    runtime._state = BatteryState(5_000)
+    runtime._clock = VirtualClock(NOW)
+    runtime._live_forecast_now = lambda: NOW
+    forecast = _coordinator_forecast(_payload(action="import_for_export"))
+    assert forecast is not None
+    await runtime._async_stage_forecast_snapshot(_snapshot(forecast))
+    accepted_ids = runtime._accepted_command_ids
+
+    await runtime._async_stage_forecast_snapshot(
+        HorizonIQSnapshot(
+            forecast_freshness=ForecastFreshness.STALE,
+            publication_sequence=2,
+        )
+    )
+
+    assert runtime.last_command_status is CommandStatus.FALLBACK_STALE
+    assert runtime._command is not None
+    assert runtime._command.mode is OperatingMode.SELF_CONSUMPTION
+    assert runtime._staged_direct_forecast is None
+    assert runtime._staged_fresh_snapshot is None
+    assert runtime.active_setpoint_w is None
+    assert runtime._last_direct_action is None
+    assert runtime._accepted_command_ids == accepted_ids
+    assert runtime.last_command_reason == (
+        "Forecast update failed; retained forecast is stale. Self-consumption applied."
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_maps_explicit_missing_snapshot_to_fallback_missing() -> None:
+    """Missing and stale forecasts remain distinct safe states."""
+    runtime = HorizonIQEntryRuntime(SimpleNamespace(), "missing-registration")
+    runtime.simulator_enabled = True
+    runtime._config = CONFIG
+    runtime._state = BatteryState(5_000)
+    runtime._clock = VirtualClock(NOW)
+    runtime._live_forecast_now = lambda: NOW
+
+    forecast = _coordinator_forecast(_payload(action="import_for_export"))
+    assert forecast is not None
+    await runtime._async_stage_forecast_snapshot(_snapshot(forecast))
+    accepted_ids = runtime._accepted_command_ids
+
+    await runtime._async_stage_forecast_snapshot(
+        HorizonIQSnapshot(
+            forecast_freshness=ForecastFreshness.MISSING,
+            publication_sequence=2,
+        )
+    )
+
+    assert runtime.last_command_status is CommandStatus.FALLBACK_MISSING
+    assert runtime._staged_direct_forecast is None
+    assert runtime._staged_fresh_snapshot is None
+    assert runtime.active_setpoint_w is None
+    assert runtime._accepted_command_ids == accepted_ids
+
+
+@pytest.mark.asyncio
+async def test_runtime_maps_fresh_snapshot_without_direct_model_to_fallback_invalid() -> None:
+    """Accepted diagnostic-only schema snapshots fail closed at the runtime boundary."""
+    runtime = HorizonIQEntryRuntime(SimpleNamespace(), "invalid-registration")
+    runtime.simulator_enabled = True
+    runtime._config = CONFIG
+    runtime._state = BatteryState(5_000)
+    runtime._clock = VirtualClock(NOW)
+    runtime._accepted_command_ids = ()
+
+    await runtime._async_stage_forecast_snapshot(
+        HorizonIQSnapshot(
+            forecast_freshness=ForecastFreshness.FRESH,
+            publication_sequence=1,
+        )
+    )
+
+    assert runtime.last_command_status is CommandStatus.FALLBACK_INVALID
+    assert runtime._last_applied_forecast_sequence == 1
+    assert runtime._accepted_command_ids == ()
 
 
 def test_live_none_with_null_command_metadata_is_safe_self_consumption() -> None:
@@ -381,8 +481,10 @@ async def test_runtime_marks_a_valid_none_forecast_healthy() -> None:
     """A no-op response is a successful direct forecast, not fallback_missing."""
 
     class FixtureCoordinator:
-        async def async_fetch_sandbox_forecast(self) -> Forecast | None:
-            return _coordinator_forecast(_fixture_payload())
+        async def async_fetch_sandbox_forecast(self) -> HorizonIQSnapshot:
+            forecast = _coordinator_forecast(_fixture_payload())
+            assert forecast is not None
+            return _snapshot(forecast)
 
     runtime = HorizonIQEntryRuntime(FixtureCoordinator(), "registration-id")
     runtime.simulator_enabled = True
@@ -424,8 +526,8 @@ async def test_raw_api_to_coordinator_model_to_runtime_boundary_for_no_action() 
     assert command.command.mode is OperatingMode.SELF_CONSUMPTION
 
     class BoundaryCoordinator:
-        async def async_fetch_sandbox_forecast(self) -> Forecast:
-            return forecast
+        async def async_fetch_sandbox_forecast(self) -> HorizonIQSnapshot:
+            return _snapshot(forecast)
 
     runtime = HorizonIQEntryRuntime(BoundaryCoordinator(), "registration-id")
     runtime.simulator_enabled = True
@@ -457,7 +559,7 @@ async def test_paused_runtime_stages_forecasts_and_reset_reports_awaiting() -> N
             return self.task
 
     hass = TaskHass()
-    coordinator = SimpleNamespace(data=SimpleNamespace(direct_forecast=forecast))
+    coordinator = SimpleNamespace(data=_snapshot(forecast))
     runtime = HorizonIQEntryRuntime(coordinator, "registration-id")
     runtime.simulator_enabled = True
     runtime._config = CONFIG

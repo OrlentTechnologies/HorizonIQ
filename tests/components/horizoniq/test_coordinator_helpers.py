@@ -1,5 +1,10 @@
 """Tests for payload normalization helpers."""
 
+import json
+from pathlib import Path
+
+import pytest
+
 from custom_components.horizoniq.coordinator_helpers import (
     build_snapshot,
     extract_forecast_cadence_minutes_from_registration_data,
@@ -9,7 +14,34 @@ from custom_components.horizoniq.coordinator_helpers import (
     normalize_periods,
     normalize_trial,
 )
-from custom_components.horizoniq.models import HorizonIQSnapshot
+from custom_components.horizoniq.models import ForecastFreshness, HorizonIQSnapshot
+
+
+FIXTURE = Path(__file__).with_name("fixtures") / "direct_schema5_forecast.json"
+
+
+def _schema_payload() -> dict[str, object]:
+    return json.loads(FIXTURE.read_text(encoding="utf-8"))
+
+
+def _schema6_payload() -> dict[str, object]:
+    """Build a valid schema-6 fixture from the complete schema-5 contract."""
+    payload = _schema_payload()
+    payload["schemaVersion"] = 6
+    payload["shouldExport"] = False
+    periods = payload["periods"]
+    assert isinstance(periods, list)
+    for period in periods:
+        assert isinstance(period, dict)
+        period["shouldExport"] = False
+    return payload
+
+
+def _legacy_direct_payload() -> dict[str, object]:
+    """Return the supported snake-case schema-version legacy wire shape."""
+    payload = _schema_payload()
+    payload["schema_version"] = payload.pop("schemaVersion")
+    return payload
 
 
 def test_extract_first_handles_none_and_missing() -> None:
@@ -440,3 +472,90 @@ def test_build_snapshot_prefers_normalized_shape() -> None:
         ),
         forecast_cadence_minutes=5,
     )
+
+
+@pytest.mark.parametrize("alias", ("Hash", "hash", "forecastHash", "forecast_hash"))
+def test_schema6_envelope_hash_is_preserved_with_canonical_aliases(alias: str) -> None:
+    """Envelope aliases, rather than nested forecast fields, own cache metadata."""
+    payload: dict[str, object] = {alias: " fresh-hash ", "Forecast": _schema6_payload()}
+
+    snapshot = build_snapshot(payload)
+
+    assert snapshot.forecast_freshness is ForecastFreshness.FRESH
+    assert snapshot.forecast_hash == "fresh-hash"
+    assert snapshot.forecast["hash"] == "fresh-hash"
+
+    duplicate = build_snapshot(
+        {
+            alias: "fresh-hash",
+            "forecast_hash": " fresh-hash ",
+            "Forecast": _schema6_payload(),
+        }
+    )
+    assert duplicate.forecast_hash == duplicate.forecast["hash"] == "fresh-hash"
+
+
+@pytest.mark.parametrize(
+    "envelope_hash",
+    (None, "", "  ", True, 1, 1.0, [], {}),
+)
+def test_schema56_envelope_hash_invalid_shapes_or_conflicts_do_not_coerce_or_replace_legacy_diagnostics(
+    envelope_hash: object,
+) -> None:
+    """Present invalid aliases never become cache hashes or raise parsing errors."""
+    for forecast in (_schema_payload(), _schema6_payload()):
+        snapshot = build_snapshot({"Hash": envelope_hash, "Forecast": forecast})
+
+        assert snapshot.forecast_freshness is ForecastFreshness.FRESH
+        assert snapshot.forecast_hash is None
+
+
+def test_schema56_invalid_or_conflicting_present_envelope_hash_never_uses_nested_cache_fallback() -> None:
+    """Invalid envelope aliases leave canonical schema diagnostics unchanged."""
+    for forecast in (_schema_payload(), _schema6_payload()):
+        forecast["hash"] = "nested-hash"
+        canonical = build_snapshot({"Forecast": forecast})
+        snapshot = build_snapshot(
+            {"Hash": "fresh-hash", "hash": "other-hash", "Forecast": forecast}
+        )
+
+        assert snapshot.forecast_hash is None
+        assert snapshot.forecast == canonical.forecast
+
+
+def test_legacy_snapshot_keeps_existing_nested_hash_only_when_envelope_alias_is_truly_absent() -> None:
+    """Legacy nested hash coercion is retained only for genuinely absent aliases."""
+    legacy = {"Forecast": {"Hash": 123, "Periods": []}}
+
+    absent = build_snapshot(legacy)
+    invalid = build_snapshot({"Hash": None, **legacy})
+    valid = build_snapshot({"Hash": " envelope ", **legacy})
+
+    assert absent.forecast_hash == "123"
+    assert invalid.forecast_hash is None
+    assert invalid.forecast["hash"] == "123"
+    assert valid.forecast_hash == "envelope"
+    assert valid.forecast["hash"] == "envelope"
+
+
+def test_valid_schema56_without_optional_direct_model_remains_fresh_but_non_executable() -> None:
+    """A complete schema response without equipment profile is accepted diagnostics."""
+    for forecast in (_schema_payload(), _schema6_payload()):
+        forecast.pop("equipmentProfile")
+
+        snapshot = build_snapshot({"Hash": "fresh-hash", "Forecast": forecast})
+
+        assert snapshot.forecast_freshness is ForecastFreshness.FRESH
+        assert snapshot.direct_forecast is None
+        assert snapshot.schema5_forecast is not None
+
+
+def test_legacy_direct_capable_and_non_direct_payloads_keep_the_freshness_matrix() -> None:
+    """Supported legacy schema aliases remain direct while diagnostics are missing."""
+    direct = build_snapshot(_legacy_direct_payload())
+    diagnostic = build_snapshot({"Forecast": {"Periods": []}})
+
+    assert direct.forecast_freshness is ForecastFreshness.FRESH
+    assert direct.direct_forecast is not None
+    assert diagnostic.forecast_freshness is ForecastFreshness.MISSING
+    assert diagnostic.direct_forecast is None

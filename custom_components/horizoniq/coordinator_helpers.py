@@ -4,6 +4,7 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
+import logging
 import math
 
 from .models import (
@@ -15,10 +16,14 @@ from .models import (
     MAX_FORECAST_PERIOD_ENERGY_WH,
     EquipmentProfile,
     HorizonIQSnapshot,
+    ForecastFreshness,
     RegistrationData,
     TrialData,
 )
 from .forecast_schema5 import Schema5Forecast, parse_schema5_forecast
+
+_LOGGER = logging.getLogger(__name__)
+_ENVELOPE_HASH_ALIASES = ("Hash", "hash", "forecastHash", "forecast_hash")
 
 
 def extract_first(payload: Mapping[str, object], keys: Iterable[str]) -> object | None:
@@ -685,9 +690,13 @@ def build_snapshot(payload: Mapping[str, object] | None) -> HorizonIQSnapshot:
         forecast["periods"] = periods
     registration = normalize_registration(payload)
 
-    forecast_hash = _coerce_str(
-        extract_first(payload, ("Hash", "hash", "forecastHash", "forecast_hash"))
-    ) or forecast.get("hash")
+    envelope_hash_present, envelope_hash = _extract_envelope_hash(payload)
+    if envelope_hash_present:
+        forecast_hash = envelope_hash
+    else:
+        forecast_hash = _coerce_str(
+            extract_first(payload, _ENVELOPE_HASH_ALIASES)
+        ) or forecast.get("hash")
     registration_data = _coerce_registration_data_string(
         _extract_registration_data_value(payload)
     ) or forecast.get("registration_data")
@@ -768,6 +777,11 @@ def build_snapshot(payload: Mapping[str, object] | None) -> HorizonIQSnapshot:
         top_level_forecast_cadence_minutes,
     )
     direct_forecast = normalize_direct_forecast(forecast)
+    freshness = (
+        ForecastFreshness.FRESH
+        if direct_forecast is not None
+        else ForecastFreshness.MISSING
+    )
 
     return HorizonIQSnapshot(
         forecast=forecast,
@@ -786,6 +800,7 @@ def build_snapshot(payload: Mapping[str, object] | None) -> HorizonIQSnapshot:
         forecast_hash=forecast_hash,
         registration_data=registration_data,
         forecast_cadence_minutes=forecast_cadence_minutes,
+        forecast_freshness=freshness,
     )
 
 
@@ -799,6 +814,9 @@ def _schema5_snapshot(
     periods = forecast.get("periods", [])
     assert isinstance(periods, list)
     direct_forecast = normalize_direct_forecast(forecast)
+    _, forecast_hash = _extract_envelope_hash(payload)
+    if forecast_hash is not None:
+        forecast["hash"] = forecast_hash
     trial = normalize_trial(payload)
     return HorizonIQSnapshot(
         forecast=forecast,
@@ -813,8 +831,34 @@ def _schema5_snapshot(
         total_cost=schema5_forecast.total_cost,
         charging_cost=schema5_forecast.charging_cost,
         saving=schema5_forecast.saving,
+        forecast_hash=forecast_hash,
         forecast_cadence_minutes=schema5_forecast.forecast_cadence_minutes,
+        forecast_freshness=ForecastFreshness.FRESH,
     )
+
+
+def _extract_envelope_hash(payload: Mapping[str, object]) -> tuple[bool, str | None]:
+    """Return envelope-hash presence and its strictly validated canonical value."""
+    present = tuple(alias for alias in _ENVELOPE_HASH_ALIASES if alias in payload)
+    if not present:
+        return False, None
+
+    canonical: list[str] = []
+    for alias in present:
+        value = payload[alias]
+        if not isinstance(value, str) or not (stripped := value.strip()):
+            _log_invalid_envelope_hash_aliases(present)
+            return True, None
+        canonical.append(stripped)
+    if len(set(canonical)) != 1:
+        _log_invalid_envelope_hash_aliases(present)
+        return True, None
+    return True, canonical[0]
+
+
+def _log_invalid_envelope_hash_aliases(aliases: tuple[str, ...]) -> None:
+    """Diagnose invalid metadata without exposing hash values."""
+    _LOGGER.debug("Conflicting or invalid forecast hash aliases: %s", ", ".join(aliases))
 
 
 def _extract_forecast_source(payload: Mapping[str, object]) -> Mapping[str, object]:

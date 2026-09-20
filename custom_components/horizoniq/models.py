@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import TypedDict
 
 from .forecast_schema5 import Schema5Forecast
@@ -211,6 +212,14 @@ class TrialData(TypedDict, total=False):
 RegistrationData = dict[str, object]
 
 
+class ForecastFreshness(str, Enum):
+    """Whether a snapshot can safely drive virtual forecast control."""
+
+    FRESH = "fresh"
+    STALE = "stale"
+    MISSING = "missing"
+
+
 @dataclass(frozen=True, slots=True)
 class HorizonIQSnapshot:
     """Typed coordinator snapshot consumed by entities."""
@@ -231,3 +240,5 @@ class HorizonIQSnapshot:
     forecast_hash: str | None = None
     registration_data: str | None = None
     forecast_cadence_minutes: int | None = None
+    forecast_freshness: ForecastFreshness = ForecastFreshness.MISSING
+    publication_sequence: int = 0

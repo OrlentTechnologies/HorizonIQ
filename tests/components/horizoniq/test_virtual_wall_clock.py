@@ -1,5 +1,6 @@
 """Virtual-mode wall-clock execution tests."""
 
+import asyncio
 import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -19,7 +20,11 @@ from custom_components.horizoniq.const import (
     SANDBOX_ENVIRONMENT,
 )
 from custom_components.horizoniq.coordinator_helpers import build_snapshot
-from custom_components.horizoniq.models import Forecast
+from custom_components.horizoniq.models import (
+    Forecast,
+    ForecastFreshness,
+    HorizonIQSnapshot,
+)
 from custom_components.horizoniq.button import SandboxStepButton
 from custom_components.horizoniq.sandbox_runtime import HorizonIQEntryRuntime
 from custom_components.horizoniq.select import (
@@ -99,6 +104,14 @@ def _forecast(*, issued_at: datetime = NOW, expires_at: datetime | None = None) 
     return forecast
 
 
+def _snapshot(forecast: Forecast, sequence: int = 1) -> HorizonIQSnapshot:
+    return HorizonIQSnapshot(
+        direct_forecast=forecast,
+        forecast_freshness=ForecastFreshness.FRESH,
+        publication_sequence=sequence,
+    )
+
+
 def _runtime(
     forecast: Forecast | None = None,
     *,
@@ -107,7 +120,9 @@ def _runtime(
     coordinator = MagicMock()
     coordinator.async_pause_for_sandbox = AsyncMock()
     coordinator.async_resume_from_sandbox = AsyncMock()
-    coordinator.async_fetch_sandbox_forecast = AsyncMock(return_value=forecast)
+    coordinator.async_fetch_sandbox_forecast = AsyncMock(
+        return_value=_snapshot(forecast) if forecast is not None else HorizonIQSnapshot()
+    )
     coordinator.effective_forecast_cadence_minutes = 15
     runtime = HorizonIQEntryRuntime(coordinator, REGISTRATION_ID, entry_id)
     runtime.configure_sandbox(_data())
@@ -159,7 +174,7 @@ async def test_virtual_wall_clock_accepts_current_action_despite_stale_replay_cl
     forecast = _forecast()
     runtime, _, _ = _runtime(forecast)
 
-    await runtime._async_stage_direct_forecast(forecast)
+    await runtime._async_stage_forecast_snapshot(_snapshot(forecast))
     await runtime._async_simulate_virtual_elapsed(30, NOW + timedelta(seconds=30), hass=None)
 
     assert runtime.last_command_status is CommandStatus.APPLIED
@@ -176,7 +191,7 @@ async def test_virtual_forecast_generation_becomes_effective_solar_without_backf
     runtime, _, _ = _runtime(forecast)
     before = runtime.energy_wh
 
-    await runtime._async_stage_direct_forecast(forecast)
+    await runtime._async_stage_forecast_snapshot(_snapshot(forecast))
 
     assert runtime.solar_w == 1_000
     assert runtime.energy_wh == before
@@ -196,7 +211,7 @@ async def test_virtual_forecast_solar_reselects_at_the_half_hour_boundary() -> N
     forecast = replace(forecast, periods=(first, second))
     runtime, _, _ = _runtime(forecast)
 
-    await runtime._async_stage_direct_forecast(forecast)
+    await runtime._async_stage_forecast_snapshot(_snapshot(forecast))
     runtime._update_forecast_solar(NOW + timedelta(minutes=30))
 
     assert runtime.solar_w == 0
@@ -210,8 +225,8 @@ async def test_invalid_virtual_forecast_generation_clears_previous_solar() -> No
     invalid = replace(valid, estimated_generation_wh=float("inf"))
     runtime, _, _ = _runtime(forecast)
 
-    await runtime._async_stage_direct_forecast(replace(forecast, periods=(valid,)))
-    await runtime._async_stage_direct_forecast(replace(forecast, periods=(invalid,)))
+    await runtime._async_stage_forecast_snapshot(_snapshot(replace(forecast, periods=(valid,))))
+    await runtime._async_stage_forecast_snapshot(_snapshot(replace(forecast, periods=(invalid,)), 2))
 
     assert runtime.solar_w == 0
     assert runtime.forecast_solar_reason == "forecast_solar_unavailable"
@@ -222,9 +237,9 @@ async def test_repeated_current_command_id_keeps_virtual_charging() -> None:
     forecast = _forecast()
     runtime, _, _ = _runtime(forecast)
 
-    await runtime._async_stage_direct_forecast(forecast)
+    await runtime._async_stage_forecast_snapshot(_snapshot(forecast))
     first_command = runtime._command
-    await runtime._async_stage_direct_forecast(forecast)
+    await runtime._async_stage_forecast_snapshot(_snapshot(forecast, 2))
     await runtime._async_simulate_virtual_elapsed(30, NOW + timedelta(seconds=30), hass=None)
 
     assert runtime._command == first_command
@@ -232,10 +247,85 @@ async def test_repeated_current_command_id_keeps_virtual_charging() -> None:
     assert runtime.battery_power_w > 0
 
 
+async def test_reset_restages_only_the_current_staged_fresh_snapshot_without_resetting_sequence() -> None:
+    """Reset is an internal restage, not a coordinator publication or sequence reset."""
+    forecast = _forecast()
+    runtime, coordinator, _ = _runtime(forecast)
+    await runtime._async_stage_forecast_snapshot(_snapshot(forecast, 7))
+
+    await runtime.async_reset()
+
+    assert runtime._last_applied_forecast_sequence == 7
+    assert runtime._staged_fresh_snapshot is not None
+    coordinator.async_fetch_sandbox_forecast.assert_not_awaited()
+
+    await runtime._async_stage_forecast_snapshot(
+        HorizonIQSnapshot(
+            forecast_freshness=ForecastFreshness.STALE,
+            publication_sequence=8,
+        )
+    )
+    accepted_ids = runtime._accepted_command_ids
+    publication_sequence = runtime._last_applied_forecast_sequence
+    await runtime.async_reset()
+
+    assert runtime._last_applied_forecast_sequence == publication_sequence
+    assert runtime._staged_fresh_snapshot is None
+    assert runtime._staged_direct_forecast is None
+    assert runtime._command is None
+    assert runtime.active_setpoint_w is None
+    assert runtime.last_command_status is CommandStatus.AWAITING_FORECAST
+    assert runtime.forecast_health == "awaiting_forecast"
+    assert runtime._accepted_command_ids == accepted_ids
+    coordinator.async_fetch_sandbox_forecast.assert_not_awaited()
+
+
+async def test_reset_restage_cannot_revive_fresh_control_after_newer_stale_wins_lock() -> None:
+    """A reset's captured plan is inert when a newer stale event clears staging."""
+    forecast = _forecast()
+    runtime, _, _ = _runtime(forecast)
+    await runtime._async_stage_forecast_snapshot(_snapshot(forecast, 7))
+    accepted_ids = runtime._accepted_command_ids
+    runtime.async_checkpoint = AsyncMock()
+    runtime._notify_listeners = MagicMock()
+
+    await runtime._direct_forecast_lock.acquire()
+    try:
+        stale_task = asyncio.create_task(
+            runtime._async_stage_forecast_snapshot(
+                HorizonIQSnapshot(
+                    forecast_freshness=ForecastFreshness.STALE,
+                    publication_sequence=8,
+                )
+            )
+        )
+        await asyncio.sleep(0)
+        restage_task = asyncio.create_task(
+            runtime._async_restage_fresh_snapshot_after_reset()
+        )
+        await asyncio.sleep(0)
+    finally:
+        runtime._direct_forecast_lock.release()
+    await asyncio.gather(stale_task, restage_task)
+
+    assert runtime._last_applied_forecast_sequence == 8
+    assert runtime._staged_fresh_snapshot is None
+    assert runtime._staged_direct_forecast is None
+    assert runtime.active_setpoint_w is None
+    assert runtime._command is not None
+    assert runtime._command.mode is OperatingMode.SELF_CONSUMPTION
+    assert runtime._last_direct_action is None
+    assert runtime._last_direct_command_id is None
+    assert runtime.last_command_status is CommandStatus.FALLBACK_STALE
+    assert runtime._accepted_command_ids == accepted_ids
+    runtime.async_checkpoint.assert_awaited_once_with(immediate=True)
+    runtime._notify_listeners.assert_called_once()
+
+
 async def test_virtual_action_expiry_returns_safely_to_self_consumption() -> None:
     """The executable action applies until its wall-time expiry, then clears."""
     runtime, _, _ = _runtime()
-    await runtime._async_stage_direct_forecast(_forecast())
+    await runtime._async_stage_forecast_snapshot(_snapshot(_forecast()))
     assert runtime._command is not None
     runtime._command = replace(runtime._command, expires_at_utc=NOW + timedelta(seconds=10))
 
@@ -261,8 +351,8 @@ async def test_virtual_command_validity_uses_wall_utc(
 ) -> None:
     """Future and expired live actions cannot alter Virtual battery power."""
     runtime, _, _ = _runtime()
-    await runtime._async_stage_direct_forecast(
-        _forecast(issued_at=issued_at, expires_at=expires_at)
+    await runtime._async_stage_forecast_snapshot(
+        _snapshot(_forecast(issued_at=issued_at, expires_at=expires_at))
     )
 
     assert runtime.last_command_status is expected_status
@@ -280,10 +370,69 @@ async def test_virtual_refresh_uses_monotonic_cadence_after_failure() -> None:
     assert runtime.last_command_status is CommandStatus.FALLBACK_MISSING
     assert runtime._virtual_next_refresh_monotonic == pytest.approx(900)
     hass.loop.now = 900
-    coordinator.async_fetch_sandbox_forecast = AsyncMock(return_value=_forecast())
+    coordinator.async_fetch_sandbox_forecast = AsyncMock(
+        return_value=_snapshot(_forecast())
+    )
     await runtime._async_refresh_virtual_if_due(hass.loop.now)
     assert coordinator.async_fetch_sandbox_forecast.await_count == 1
     assert runtime.last_command_status is CommandStatus.APPLIED
+
+
+async def test_direct_refresh_timeout_uses_stale_snapshot_not_last_direct_forecast() -> None:
+    """A failed explicit refresh cannot revive cached executable control."""
+    forecast = _forecast()
+    runtime, coordinator, _ = _runtime(forecast)
+    await runtime._async_stage_forecast_snapshot(_snapshot(forecast, 1))
+    await runtime._async_stage_forecast_snapshot(
+        HorizonIQSnapshot(
+            forecast_freshness=ForecastFreshness.STALE,
+            publication_sequence=2,
+        )
+    )
+    coordinator.last_direct_forecast = forecast
+    coordinator.async_fetch_sandbox_forecast = AsyncMock(side_effect=RuntimeError("timeout"))
+
+    await runtime._async_refresh_direct_forecast()
+
+    assert runtime.last_command_status is CommandStatus.FALLBACK_STALE
+    assert runtime._staged_direct_forecast is None
+    assert runtime._command is not None
+    assert runtime._command.mode is OperatingMode.SELF_CONSUMPTION
+
+
+async def test_fresh_recovery_after_stale_accepts_new_command_once_at_lock_boundary() -> None:
+    """A lock-gated fresh recovery applies once and retains its duplicate."""
+    runtime, _, _ = _runtime()
+    first = _forecast()
+    recovered = _forecast()
+    assert first.periods[0].command_id != recovered.periods[0].command_id
+    await runtime._async_stage_forecast_snapshot(_snapshot(first, 1))
+    await runtime._direct_forecast_lock.acquire()
+    try:
+        stale_task = asyncio.create_task(
+            runtime._async_stage_forecast_snapshot(
+                HorizonIQSnapshot(
+                    forecast_freshness=ForecastFreshness.STALE,
+                    publication_sequence=2,
+                )
+            )
+        )
+        recovery_task = asyncio.create_task(
+            runtime._async_stage_forecast_snapshot(_snapshot(recovered, 3))
+        )
+    finally:
+        runtime._direct_forecast_lock.release()
+    await asyncio.gather(stale_task, recovery_task)
+    command = runtime._command
+    action = runtime._last_direct_action
+    accepted_ids = runtime._accepted_command_ids
+    await runtime._async_stage_forecast_snapshot(_snapshot(recovered, 3))
+
+    assert runtime.last_command_status is CommandStatus.APPLIED
+    assert runtime._command == command
+    assert runtime._last_direct_action == action
+    assert runtime._accepted_command_ids == accepted_ids
+    assert runtime._last_applied_forecast_sequence == 3
 
 
 async def test_virtual_timing_gap_skips_catch_up_energy() -> None:

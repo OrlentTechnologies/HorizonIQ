@@ -43,7 +43,13 @@ from .coordinator_helpers import (
     normalize_trial,
 )
 from .forecast_schema5 import Schema5Forecast, Schema5ForecastError
-from .models import Forecast, ForecastData, ForecastPeriod, HorizonIQSnapshot
+from .models import (
+    Forecast,
+    ForecastData,
+    ForecastFreshness,
+    ForecastPeriod,
+    HorizonIQSnapshot,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -89,6 +95,7 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         self._has_successful_forecast = False
         self._initial_forecast_failures = 0
         self._latest_snapshot = HorizonIQSnapshot()
+        self._publication_sequence: int = 0
         self._last_valid_schema5_forecast: Schema5Forecast | None = None
         self.environment = normalize_environment(environment)
         self._sandbox_paused = False
@@ -124,7 +131,7 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         self._sandbox_paused = False
         await self.async_request_refresh()
 
-    async def async_fetch_sandbox_forecast(self) -> Forecast | None:
+    async def async_fetch_sandbox_forecast(self) -> HorizonIQSnapshot:
         """Fetch one direct virtual-battery forecast through the coordinator model."""
         battery_capacity = self._current_battery_capacity()
         try:
@@ -132,11 +139,13 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
                 request_url=self._build_request_url(battery_capacity),
                 battery_capacity=battery_capacity,
             )
-        except UpdateFailed:
+        except UpdateFailed as err:
+            if str(err) == EXACT_SUBSCRIPTION_FAILURE_BODY:
+                raise
             self._publish_stale_forecast()
             raise
         snapshot = self._build_snapshot_or_stale(payload)
-        self._latest_snapshot = snapshot
+        snapshot = self._commit_snapshot_publication(snapshot)
         self._has_successful_forecast = True
         self._initial_forecast_failures = 0
         if snapshot.forecast_cadence_minutes is not None:
@@ -144,7 +153,7 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         if self._update_cached_state(snapshot):
             self._persist_state()
         self.async_set_updated_data(snapshot)
-        return snapshot.direct_forecast
+        return snapshot
 
     async def async_fetch_sandbox_replay(
         self, request: Mapping[str, object]
@@ -255,9 +264,9 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
                 battery_capacity=battery_capacity,
             )
         except UpdateFailed as err:
-            self._publish_stale_forecast()
             if str(err) == EXACT_SUBSCRIPTION_FAILURE_BODY:
                 raise
+            self._publish_stale_forecast()
             if self._has_successful_forecast:
                 raise
             raise UpdateFailed(
@@ -269,7 +278,7 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         self._initial_forecast_failures = 0
         if snapshot.forecast_cadence_minutes is not None:
             self._set_forecast_cadence_minutes(snapshot.forecast_cadence_minutes)
-        self._latest_snapshot = snapshot
+        snapshot = self._commit_snapshot_publication(snapshot)
 
         if self._update_cached_state(snapshot):
             self._persist_state()
@@ -290,16 +299,19 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         except Schema5ForecastError as err:
             if self._last_valid_schema5_forecast is None:
                 raise UpdateFailed(f"Malformed schema-5 forecast: {err}") from err
-            return replace(
-                self._current_snapshot,
-                schema5_forecast=self._last_valid_schema5_forecast.as_stale(),
-            )
+            self._publish_stale_forecast()
+            raise UpdateFailed(f"Malformed schema-5 forecast: {err}") from err
         if snapshot.schema5_forecast is not None:
             self._last_valid_schema5_forecast = snapshot.schema5_forecast
-        elif self._last_valid_schema5_forecast is not None:
+        elif (
+            self._last_valid_schema5_forecast is not None
+            and snapshot.direct_forecast is None
+        ):
             snapshot = replace(
                 snapshot,
                 schema5_forecast=self._last_valid_schema5_forecast.as_stale(),
+                direct_forecast=None,
+                forecast_freshness=ForecastFreshness.STALE,
             )
         return snapshot
 
@@ -310,9 +322,38 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         stale_snapshot = replace(
             self._current_snapshot,
             schema5_forecast=self._last_valid_schema5_forecast.as_stale(),
+            direct_forecast=None,
+            forecast_freshness=ForecastFreshness.STALE,
+            publication_sequence=0,
         )
-        self._latest_snapshot = stale_snapshot
-        self.async_set_updated_data(stale_snapshot)
+        self.async_set_updated_data(self._commit_snapshot_publication(stale_snapshot))
+
+    def _commit_snapshot_publication(
+        self, snapshot: HorizonIQSnapshot
+    ) -> HorizonIQSnapshot:
+        """Assign the sole ordered publication revision to a valid snapshot."""
+        if not isinstance(snapshot.forecast_freshness, ForecastFreshness):
+            raise RuntimeError("Snapshot freshness must be ForecastFreshness")
+        if (
+            isinstance(snapshot.publication_sequence, bool)
+            or not isinstance(snapshot.publication_sequence, int)
+            or snapshot.publication_sequence != 0
+        ):
+            raise RuntimeError("Snapshot publication sequence is already committed")
+        if snapshot.direct_forecast is not None and not isinstance(
+            snapshot.direct_forecast, Forecast
+        ):
+            raise RuntimeError("Snapshot direct forecast has an invalid type")
+        if (
+            snapshot.forecast_freshness
+            in {ForecastFreshness.STALE, ForecastFreshness.MISSING}
+            and snapshot.direct_forecast is not None
+        ):
+            raise RuntimeError("Non-fresh snapshot cannot contain a direct forecast")
+        self._publication_sequence += 1
+        committed = replace(snapshot, publication_sequence=self._publication_sequence)
+        self._latest_snapshot = committed
+        return committed
 
     def _next_initial_forecast_retry_seconds(self) -> int:
         """Return the next retry delay before the first successful forecast."""
@@ -545,7 +586,7 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
     def _update_cached_state(self, snapshot: HorizonIQSnapshot) -> bool:
         updated = False
 
-        if (
+        if snapshot.forecast_freshness is ForecastFreshness.FRESH and (
             snapshot.forecast_hash is not None
             and snapshot.forecast_hash != self._last_hash
         ):
@@ -553,7 +594,19 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
             updated = True
             _LOGGER.debug("Stored new forecast hash for entry %s", self._entry.entry_id)
 
-        if (
+        # Legacy forecast responses can carry a renewed opaque registration
+        # credential without supplying a direct-control plan. Keep that
+        # historical metadata refresh path, but never let a stale plan or an
+        # authorization diagnostic change credentials. Hashes remain tied to
+        # executable fresh forecasts only.
+        accepts_registration_metadata = (
+            snapshot.forecast_freshness is ForecastFreshness.FRESH
+            or (
+                snapshot.forecast_freshness is ForecastFreshness.MISSING
+                and "authorization_status" not in snapshot.trial
+            )
+        )
+        if accepts_registration_metadata and (
             snapshot.registration_data is not None
             and snapshot.registration_data != self._registration_data
         ):
@@ -590,6 +643,18 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         entry_data[CONF_REGISTRATION_DATA] = ""
         entry_data[CONF_SUBSCRIPTION_STATUS] = SUBSCRIPTION_STATUS_NO_SUBSCRIPTION
         self._hass.config_entries.async_update_entry(self._entry, data=entry_data)
+
+        if self._last_valid_schema5_forecast is not None:
+            terminal = replace(
+                self._current_snapshot,
+                schema5_forecast=self._last_valid_schema5_forecast.as_stale(),
+                direct_forecast=None,
+                forecast_freshness=ForecastFreshness.STALE,
+                publication_sequence=0,
+            )
+        else:
+            terminal = HorizonIQSnapshot()
+        self.async_set_updated_data(self._commit_snapshot_publication(terminal))
 
         ir.async_create_issue(
             self._hass,

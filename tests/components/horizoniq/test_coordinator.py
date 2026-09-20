@@ -1,7 +1,10 @@
 """Tests for the update coordinator."""
 
+import asyncio
 from datetime import timedelta
-from unittest.mock import AsyncMock
+import json
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.helpers.update_coordinator import UpdateFailed
@@ -21,7 +24,30 @@ from custom_components.horizoniq.const import (
     SUBSCRIPTION_STATUS_NO_SUBSCRIPTION,
 )
 from custom_components.horizoniq.coordinator import HorizonIQCoordinator
-from custom_components.horizoniq.models import HorizonIQSnapshot
+from custom_components.horizoniq.models import ForecastFreshness, HorizonIQSnapshot
+
+
+FIXTURE = Path(__file__).with_name("fixtures") / "direct_schema5_forecast.json"
+
+
+def _schema6_payload(*, hash_value: str = "fresh-hash") -> dict[str, object]:
+    """Return the complete schema-6 response shape used at the HTTP boundary."""
+    forecast = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    forecast["schemaVersion"] = 6
+    forecast["shouldExport"] = False
+    periods = forecast["periods"]
+    assert isinstance(periods, list)
+    for period in periods:
+        assert isinstance(period, dict)
+        period["shouldExport"] = False
+    return {"Hash": hash_value, "Forecast": forecast}
+
+
+def _legacy_direct_payload() -> dict[str, object]:
+    """Return the supported snake-case schema-version legacy wire shape."""
+    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    payload["schema_version"] = payload.pop("schemaVersion")
+    return payload
 
 
 async def test_sandbox_forecast_request_has_no_client_control_capability(
@@ -53,8 +79,18 @@ async def test_coordinator_updates_cached_values_from_api(
     entry_data: dict[str, str],
     aioclient_mock,
 ) -> None:
-    """Coordinator normalizes payload data and persists cached values."""
+    """A legacy diagnostic refreshes registration data but not its hash."""
     hass.states.async_set(entry_data["battery_capacity_sensor"], "53")
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        data={
+            **mock_config_entry.data,
+            CONF_HASH: "old-hash",
+            CONF_REGISTRATION_DATA: (
+                '{"id":"registration-1","ForecastCadenceMinutes":5}'
+            ),
+        },
+    )
 
     coordinator = HorizonIQCoordinator(
         hass,
@@ -79,6 +115,7 @@ async def test_coordinator_updates_cached_values_from_api(
             "Currency": "GBP",
             "TargetCapacity": "57.5",
             "Forecast": {
+                "RegistrationId": "registration-2",
                 "Date": "2026-03-07T10:00:00+00:00",
                 "Periods": [
                     {
@@ -91,11 +128,17 @@ async def test_coordinator_updates_cached_values_from_api(
         },
     )
 
-    snapshot = await coordinator._async_update_data()
+    with patch.object(
+        hass.config_entries,
+        "async_update_entry",
+        wraps=hass.config_entries.async_update_entry,
+    ) as update_entry:
+        snapshot = await coordinator._async_update_data()
     await hass.async_block_till_done()
 
     assert snapshot == HorizonIQSnapshot(
         forecast={
+            "registration_id": "registration-2",
             "date": "2026-03-07T10:00:00+00:00",
             "hash": "new-hash",
             "periods": [
@@ -132,8 +175,10 @@ async def test_coordinator_updates_cached_values_from_api(
             '"ForecastCadenceMinutes":1}'
         ),
         forecast_cadence_minutes=1,
+        forecast_freshness=ForecastFreshness.MISSING,
+        publication_sequence=1,
     )
-    assert coordinator.last_hash == "new-hash"
+    assert coordinator.last_hash == "old-hash"
     assert coordinator.registration_data == (
         '{"id":"registration-2","DynamicCharging":true,"ForecastCadenceMinutes":1}'
     )
@@ -150,10 +195,240 @@ async def test_coordinator_updates_cached_values_from_api(
             "battery_management_system_state": "charging",
         }
     ]
-    assert mock_config_entry.data[CONF_HASH] == "new-hash"
+    assert mock_config_entry.data[CONF_HASH] == "old-hash"
     assert mock_config_entry.data[CONF_REGISTRATION_DATA] == (
         '{"id":"registration-2","DynamicCharging":true,"ForecastCadenceMinutes":1}'
     )
+    update_entry.assert_called_once_with(
+        mock_config_entry,
+        data={
+            **entry_data,
+            CONF_HASH: "old-hash",
+            CONF_REGISTRATION_DATA: (
+                '{"id":"registration-2","DynamicCharging":true,'
+                '"ForecastCadenceMinutes":1}'
+            ),
+        },
+    )
+
+
+async def test_schema6_envelope_hash_persists_and_is_sent_on_the_next_request(
+    hass, mock_config_entry, entry_data: dict[str, str], aioclient_mock
+) -> None:
+    """A valid response-envelope hash reaches cache, entry storage and next URL."""
+    coordinator = HorizonIQCoordinator(
+        hass,
+        mock_config_entry,
+        entry_data["url"],
+        entry_data["api_key"],
+        entry_data["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+    )
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "4320")
+    first_url = coordinator._build_request_url("4320")
+    assert first_url.endswith("currentBatteryCapacity=4320&hash=&registrationData=")
+    aioclient_mock.get(first_url, json=_schema6_payload(hash_value=" fresh-hash "))
+
+    with patch.object(
+        hass.config_entries,
+        "async_update_entry",
+        wraps=hass.config_entries.async_update_entry,
+    ) as update_entry:
+        snapshot = await coordinator._async_update_data()
+        assert aioclient_mock.call_count == 1
+
+        next_url = coordinator._build_request_url("4320")
+        assert next_url == first_url.replace("hash=&", "hash=fresh-hash&")
+        aioclient_mock.get(next_url, json=_schema6_payload())
+        repeated = await coordinator._async_update_data()
+
+    assert snapshot.forecast_freshness is ForecastFreshness.FRESH
+    assert snapshot.forecast_hash == "fresh-hash"
+    assert snapshot.publication_sequence == 1
+    assert repeated.publication_sequence == 2
+    assert aioclient_mock.call_count == 2
+    assert coordinator.last_hash == mock_config_entry.data[CONF_HASH] == "fresh-hash"
+    assert "hash=fresh-hash" in coordinator._build_request_url("4320")
+    update_entry.assert_called_once()
+
+
+async def test_stale_response_keeps_cached_hash_and_publishes_non_executable_stale_snapshot(
+    hass, mock_config_entry, entry_data: dict[str, str]
+) -> None:
+    """Transport failure after a fresh response retains diagnostics and cache only."""
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "4320")
+    coordinator = HorizonIQCoordinator(
+        hass, mock_config_entry, entry_data["url"], entry_data["api_key"],
+        entry_data["battery_capacity_sensor"], SANDBOX_ENVIRONMENT,
+        initial_registration="accepted-registration-data",
+    )
+    fresh = coordinator._commit_snapshot_publication(
+        coordinator._build_snapshot_or_stale(_schema6_payload())
+    )
+    coordinator.async_set_updated_data(fresh)
+    coordinator._update_cached_state(fresh)
+    coordinator._persist_state()
+    accepted = fresh.schema5_forecast
+    assert accepted is not None
+
+    coordinator._fetch_payload = AsyncMock(side_effect=UpdateFailed("timeout"))  # type: ignore[method-assign]
+    with pytest.raises(UpdateFailed):
+        await coordinator._async_update_data()
+
+    stale = coordinator.data
+    assert stale.forecast_freshness is ForecastFreshness.STALE
+    assert stale.direct_forecast is None
+    assert stale.schema5_forecast is not None and stale.schema5_forecast.stale is True
+    assert stale.schema5_forecast.current_capacity == accepted.current_capacity
+    assert coordinator.last_hash == mock_config_entry.data[CONF_HASH] == "fresh-hash"
+    assert coordinator.registration_data == "accepted-registration-data"
+    assert mock_config_entry.data[CONF_REGISTRATION_DATA] == "accepted-registration-data"
+    assert "hash=fresh-hash" in coordinator._build_request_url("4320")
+
+
+async def test_malformed_schema6_after_history_publishes_stale_once_then_fails_each_fetch_path(
+    hass, mock_config_entry, entry_data: dict[str, str], aioclient_mock
+) -> None:
+    """Malformed history publishes stale once per caller, then propagates failure."""
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "4320")
+    coordinator = HorizonIQCoordinator(
+        hass, mock_config_entry, entry_data["url"], entry_data["api_key"],
+        entry_data["battery_capacity_sensor"], SANDBOX_ENVIRONMENT,
+        initial_registration="accepted-registration-data",
+    )
+    fresh_url = coordinator._build_request_url("4320")
+    aioclient_mock.get(fresh_url, json=_schema6_payload())
+    fresh = await coordinator._async_update_data()
+    coordinator.async_set_updated_data(fresh)
+    aioclient_mock.clear_requests()
+    malformed = _schema6_payload()
+    forecast = malformed["Forecast"]
+    assert isinstance(forecast, dict)
+    periods = forecast["periods"]
+    assert isinstance(periods, list) and periods
+    assert isinstance(periods[0], dict)
+    periods[0]["period"] = "not-an-integer"
+    malformed["RegistrationData"] = "unsafe-registration-data"
+    malformed_url = coordinator._build_request_url("4320")
+    aioclient_mock.get(malformed_url, json=malformed)
+    listener = MagicMock()
+    coordinator.async_add_listener(listener)
+
+    with pytest.raises(UpdateFailed, match="Malformed schema-5 forecast"):
+        await coordinator._async_update_data()
+    normal_stale = coordinator.data
+
+    with pytest.raises(UpdateFailed, match="Malformed schema-5 forecast"):
+        await coordinator.async_fetch_sandbox_forecast()
+    explicit_stale = coordinator.data
+
+    assert normal_stale.forecast_freshness is ForecastFreshness.STALE
+    assert normal_stale.direct_forecast is None
+    assert normal_stale.schema5_forecast is not None and normal_stale.schema5_forecast.stale
+    assert explicit_stale.forecast_freshness is ForecastFreshness.STALE
+    assert explicit_stale.direct_forecast is None
+    assert explicit_stale.publication_sequence == normal_stale.publication_sequence + 1
+    assert listener.call_count == 2
+    assert coordinator.last_hash == mock_config_entry.data[CONF_HASH] == "fresh-hash"
+    assert coordinator.registration_data == "accepted-registration-data"
+    assert mock_config_entry.data[CONF_REGISTRATION_DATA] == "accepted-registration-data"
+
+
+async def test_absent_schema_or_authorization_diagnostic_after_history_is_stale_but_initial_is_missing(
+    hass, mock_config_entry, entry_data: dict[str, str]
+) -> None:
+    """Diagnostic-only successful payloads preserve the initial/history matrix."""
+    coordinator = HorizonIQCoordinator(
+        hass, mock_config_entry, entry_data["url"], entry_data["api_key"],
+        entry_data["battery_capacity_sensor"], SANDBOX_ENVIRONMENT,
+    )
+    initial = coordinator._build_snapshot_or_stale({"AuthorizationStatus": "unauthorized"})
+    assert initial.forecast_freshness is ForecastFreshness.MISSING
+
+    coordinator._build_snapshot_or_stale(_schema6_payload())
+    after_history = coordinator._build_snapshot_or_stale({"AuthorizationStatus": "unauthorized"})
+    assert after_history.forecast_freshness is ForecastFreshness.STALE
+    assert after_history.direct_forecast is None
+
+
+async def test_legacy_direct_capable_response_remains_fresh_with_or_without_schema_history(
+    hass, mock_config_entry, entry_data: dict[str, str]
+) -> None:
+    """The supported snake-case schema alias retains its schema-parser path."""
+    coordinator = HorizonIQCoordinator(
+        hass, mock_config_entry, entry_data["url"], entry_data["api_key"],
+        entry_data["battery_capacity_sensor"], SANDBOX_ENVIRONMENT,
+    )
+    legacy = _legacy_direct_payload()
+    first = coordinator._build_snapshot_or_stale(legacy)
+    coordinator._build_snapshot_or_stale(_schema6_payload())
+    second = coordinator._build_snapshot_or_stale(legacy)
+
+    assert first.forecast_freshness is second.forecast_freshness is ForecastFreshness.FRESH
+    assert first.direct_forecast is not None and second.direct_forecast is not None
+    assert first.schema5_forecast is not None and second.schema5_forecast is not None
+
+
+@pytest.mark.parametrize("uncommitted_sequence", (False, 0.0))
+async def test_commit_rejects_non_integer_uncommitted_sequence_without_state_change(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+    uncommitted_sequence: object,
+) -> None:
+    """Only the actual integer zero denotes an uncommitted publication."""
+    coordinator = HorizonIQCoordinator(
+        hass, mock_config_entry, entry_data["url"], entry_data["api_key"],
+        entry_data["battery_capacity_sensor"], SANDBOX_ENVIRONMENT,
+    )
+    before = (coordinator._publication_sequence, coordinator._latest_snapshot)
+
+    with pytest.raises(RuntimeError, match="publication sequence"):
+        coordinator._commit_snapshot_publication(
+            HorizonIQSnapshot(publication_sequence=uncommitted_sequence)  # type: ignore[arg-type]
+        )
+
+    assert (coordinator._publication_sequence, coordinator._latest_snapshot) == before
+
+
+async def test_exact_subscription_failure_clears_persisted_hash_but_never_publishes_executable_control(
+    hass, mock_config_entry, entry_data: dict[str, str]
+) -> None:
+    """Entitlement loss is the sole terminal cache-clear path and is non-executable."""
+    coordinator = HorizonIQCoordinator(
+        hass, mock_config_entry, entry_data["url"], entry_data["api_key"],
+        entry_data["battery_capacity_sensor"], SANDBOX_ENVIRONMENT,
+    )
+    fresh = coordinator._commit_snapshot_publication(
+        coordinator._build_snapshot_or_stale(_schema6_payload())
+    )
+    coordinator.async_set_updated_data(fresh)
+    coordinator._update_cached_state(fresh)
+    coordinator._persist_state()
+
+    coordinator._handle_subscription_loss()
+
+    assert coordinator.last_hash == mock_config_entry.data[CONF_HASH] == ""
+    assert coordinator.data.forecast_freshness is ForecastFreshness.STALE
+    assert coordinator.data.direct_forecast is None
+    assert coordinator.data.publication_sequence == 2
+
+
+async def test_coordinator_cancellation_does_not_publish_or_increment_sequence(
+    hass, mock_config_entry, entry_data: dict[str, str]
+) -> None:
+    """Caller cancellation stays outside stale publication and cache mutation paths."""
+    coordinator = HorizonIQCoordinator(
+        hass, mock_config_entry, entry_data["url"], entry_data["api_key"],
+        entry_data["battery_capacity_sensor"], SANDBOX_ENVIRONMENT,
+    )
+    coordinator._fetch_payload = AsyncMock(side_effect=asyncio.CancelledError())  # type: ignore[method-assign]
+
+    with pytest.raises(asyncio.CancelledError):
+        await coordinator._async_update_data()
+
+    assert coordinator._publication_sequence == 0
+    assert coordinator._latest_snapshot == HorizonIQSnapshot()
 
 
 async def test_clear_registration_data_persists_and_refreshes(

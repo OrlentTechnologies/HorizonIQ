@@ -98,7 +98,12 @@ from .direct_control import (
     validate_period_generation,
     validate_virtual_recommendation,
 )
-from .models import DirectForecastPeriod, Forecast
+from .models import (
+    DirectForecastPeriod,
+    Forecast,
+    ForecastFreshness,
+    HorizonIQSnapshot,
+)
 from .forecast_schema5 import Schema5Forecast
 from .sandbox_storage import (
     MAX_NAMED_SNAPSHOTS,
@@ -388,6 +393,8 @@ class HorizonIQEntryRuntime:
     _last_direct_command_id: str | None = None
     _last_direct_action: str | None = None
     _staged_direct_forecast: Forecast | None = None
+    _staged_fresh_snapshot: HorizonIQSnapshot | None = None
+    _last_applied_forecast_sequence: int = 0
     _direct_forecast_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _state_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _live_forecast_now: Callable[[], datetime] = field(
@@ -878,6 +885,7 @@ class HorizonIQEntryRuntime:
             self._cancel_virtual_schedule()
             self._clear_pending_command()
             self._staged_direct_forecast = None
+            self._staged_fresh_snapshot = None
             self._direct_replay_payload = None
             self._last_direct_replay_key = None
         if self._clock is not None:
@@ -1152,6 +1160,7 @@ class HorizonIQEntryRuntime:
                 self._last_direct_command_id = None
                 self._last_direct_action = None
                 self._staged_direct_forecast = None
+                self._staged_fresh_snapshot = None
                 self._clear_external_power()
                 self._clear_replay_state_for_virtual()
                 if self._clock is not None:
@@ -1451,6 +1460,7 @@ class HorizonIQEntryRuntime:
         self._direct_replay_payload = None
         self._last_direct_replay_key = None
         self._staged_direct_forecast = None
+        self._staged_fresh_snapshot = None
         self._last_direct_command_id = None
         self._last_direct_action = None
         self._direct_forecast_health = "unavailable"
@@ -2454,6 +2464,7 @@ class HorizonIQEntryRuntime:
         self._last_direct_command_id = None
         self._last_direct_action = None
         self._staged_direct_forecast = None
+        self._staged_fresh_snapshot = None
         self.solar_w = 0.0
         self._clear_forecast_solar_diagnostics()
         self._freeze_fault_durations()
@@ -2575,8 +2586,7 @@ class HorizonIQEntryRuntime:
                 "Sandbox reset before command correlation completed.",
             )
         self.reset(energy_wh=energy_wh)
-        if self._staged_forecast_covers_virtual_time():
-            await self._async_stage_direct_forecast(self._staged_direct_forecast)
+        await self._async_restage_fresh_snapshot_after_reset()
         await self._async_publish_telemetry_snapshot()
         await self._async_publish_runtime_statuses(force=True)
         await self.async_checkpoint(immediate=True)
@@ -3030,10 +3040,10 @@ class HorizonIQEntryRuntime:
             return
         async with self._virtual_refresh_lock:
             try:
-                forecast = await self.coordinator.async_fetch_sandbox_forecast()
+                snapshot = await self.coordinator.async_fetch_sandbox_forecast()
             except Exception as err:
                 self._logger_debug_direct_failure(err)
-                forecast = getattr(self.coordinator, "last_direct_forecast", None)
+                return
             finally:
                 if (
                     self.simulator_enabled
@@ -3044,9 +3054,8 @@ class HorizonIQEntryRuntime:
                         self._hass.loop.time()
                         + self._virtual_refresh_interval_seconds()
                     )
-            await self._async_stage_direct_forecast(
-                forecast if isinstance(forecast, Forecast) else None
-            )
+            if isinstance(snapshot, HorizonIQSnapshot):
+                await self._async_stage_forecast_snapshot(snapshot)
 
     def _subscribe_to_coordinator_forecasts(self) -> None:
         """Stage normal coordinator updates even while virtual time is paused."""
@@ -3060,42 +3069,112 @@ class HorizonIQEntryRuntime:
         if not self.simulator_enabled or self._hass is None:
             return
         snapshot = getattr(self.coordinator, "data", None)
-        forecast = getattr(snapshot, "direct_forecast", None)
+        if not isinstance(snapshot, HorizonIQSnapshot):
+            return
         self._hass.async_create_task(
-            self._async_stage_direct_forecast(
-                forecast if isinstance(forecast, Forecast) else None
-            )
+            self._async_stage_forecast_snapshot(snapshot)
         )
 
-    async def _async_stage_direct_forecast(self, forecast: Forecast | None) -> None:
+    async def _async_stage_forecast_snapshot(self, snapshot: HorizonIQSnapshot) -> None:
         """Validate and apply a coordinator forecast independently of physics time."""
+        await self._async_apply_forecast_snapshot(snapshot, allow_restage=False)
+
+    async def _async_restage_fresh_snapshot_after_reset(self) -> None:
+        """Reapply only the currently staged fresh snapshot after a reset."""
+        await self._async_apply_forecast_snapshot(None, allow_restage=True)
+
+    async def _async_apply_forecast_snapshot(
+        self, snapshot: HorizonIQSnapshot | None, *, allow_restage: bool
+    ) -> None:
+        """Consume one ordered coordinator snapshot under the forecast lock."""
         if (
-            not self.simulator_enabled
+            self._unloaded
+            or not self.simulator_enabled
             or self._operating_mode != "virtual"
             or self._config is None
         ):
             return
         async with self._direct_forecast_lock:
             if (
-                not self.simulator_enabled
+                self._unloaded
+                or not self.simulator_enabled
                 or self._operating_mode != "virtual"
                 or self._config is None
             ):
                 return
-            if forecast is None:
-                self._staged_direct_forecast = None
-                self._clear_forecast_solar("forecast_solar_unavailable")
-                self._command = None
-                self._last_direct_action = None
-                self.last_command_status = CommandStatus.FALLBACK_MISSING
-                self.last_command_reason = None
-                self._direct_forecast_health = "unavailable"
-                await self.async_checkpoint(immediate=True)
-                self._notify_listeners()
+            if allow_restage:
+                snapshot = self._staged_fresh_snapshot
+            if snapshot is None:
                 return
+            sequence = snapshot.publication_sequence
+            freshness = snapshot.forecast_freshness
+            forecast = snapshot.direct_forecast
+            if allow_restage:
+                if (
+                    snapshot is not self._staged_fresh_snapshot
+                    or freshness is not ForecastFreshness.FRESH
+                    or not isinstance(forecast, Forecast)
+                    or isinstance(sequence, bool)
+                    or not isinstance(sequence, int)
+                    or sequence <= 0
+                    or sequence != self._last_applied_forecast_sequence
+                    or not self._staged_forecast_covers_virtual_time()
+                ):
+                    return
+            elif (
+                isinstance(sequence, bool)
+                or not isinstance(sequence, int)
+                or sequence <= 0
+                or sequence <= self._last_applied_forecast_sequence
+            ):
+                return
+            else:
+                self._last_applied_forecast_sequence = sequence
             live_now_utc = self._runtime_now_utc()
+            if not isinstance(freshness, ForecastFreshness) or (
+                freshness is ForecastFreshness.FRESH
+                and not isinstance(forecast, Forecast)
+            ) or (
+                freshness in {ForecastFreshness.STALE, ForecastFreshness.MISSING}
+                and forecast is not None
+            ):
+                await self._async_apply_forecast_fallback(
+                    status=CommandStatus.FALLBACK_INVALID,
+                    reason="Direct forecast rejected; self-consumption used.",
+                    health="failed",
+                    clear_command_id=False,
+                )
+                return
+            if freshness is ForecastFreshness.STALE:
+                await self._async_apply_forecast_fallback(
+                    status=CommandStatus.FALLBACK_STALE,
+                    reason=(
+                        "Forecast update failed; retained forecast is stale. "
+                        "Self-consumption applied."
+                    ),
+                    health="failed",
+                    clear_command_id=True,
+                )
+                return
+            if freshness is ForecastFreshness.MISSING:
+                await self._async_apply_forecast_fallback(
+                    status=CommandStatus.FALLBACK_MISSING,
+                    reason=None,
+                    health="unavailable",
+                    clear_command_id=False,
+                )
+                return
+            if freshness is not ForecastFreshness.FRESH:
+                await self._async_apply_forecast_fallback(
+                    status=CommandStatus.FALLBACK_INVALID,
+                    reason="Direct forecast rejected; self-consumption used.",
+                    health="failed",
+                    clear_command_id=False,
+                )
+                return
             if self._charging_source == "external":
                 self._staged_direct_forecast = forecast
+                self._staged_fresh_snapshot = snapshot
                 self._update_forecast_solar(live_now_utc)
                 self._command = Command(OperatingMode.SELF_CONSUMPTION)
                 self._last_direct_command_id = None
@@ -3114,6 +3193,7 @@ class HorizonIQEntryRuntime:
             if not validation.is_valid:
                 rejection = validation.rejection or DirectForecastRejection.OTHER_INVALID
                 self._staged_direct_forecast = None
+                self._staged_fresh_snapshot = None
                 self._clear_forecast_solar("forecast_solar_unavailable")
                 self._command = Command(OperatingMode.SELF_CONSUMPTION)
                 self._last_direct_action = None
@@ -3132,6 +3212,7 @@ class HorizonIQEntryRuntime:
                 direct = validation.command
                 assert direct is not None
                 self._staged_direct_forecast = forecast
+                self._staged_fresh_snapshot = snapshot
                 self._update_forecast_solar(live_now_utc)
                 if direct.command_id is None:
                     self._command = direct.command
@@ -3178,6 +3259,7 @@ class HorizonIQEntryRuntime:
                     self._direct_forecast_health = "healthy"
             except Exception as err:
                 self._staged_direct_forecast = None
+                self._staged_fresh_snapshot = None
                 self._clear_forecast_solar("forecast_solar_unavailable")
                 self._command = Command(OperatingMode.SELF_CONSUMPTION)
                 self._last_direct_action = None
@@ -3187,6 +3269,28 @@ class HorizonIQEntryRuntime:
                 self._logger_debug_direct_failure(err)
             await self.async_checkpoint(immediate=True)
             self._notify_listeners()
+
+    async def _async_apply_forecast_fallback(
+        self,
+        *,
+        status: CommandStatus,
+        reason: str | None,
+        health: str,
+        clear_command_id: bool,
+    ) -> None:
+        """Fail closed without mutating the accepted-command-ID ledger."""
+        self._staged_fresh_snapshot = None
+        self._staged_direct_forecast = None
+        self._clear_forecast_solar("forecast_solar_unavailable")
+        self._command = Command(OperatingMode.SELF_CONSUMPTION)
+        self._last_direct_action = None
+        if clear_command_id:
+            self._last_direct_command_id = None
+        self.last_command_status = status
+        self.last_command_reason = reason
+        self._direct_forecast_health = health
+        await self.async_checkpoint(immediate=True)
+        self._notify_listeners()
 
     def _staged_forecast_covers_virtual_time(self) -> bool:
         """Only reapply a cached plan when it is current after a reset."""
