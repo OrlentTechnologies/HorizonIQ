@@ -90,10 +90,7 @@ def adapt_schema5_wire(payload: Mapping[str, object]) -> dict[str, object] | Non
         children={
             "economicsAssumptions": (_ECONOMICS_FIELDS, {}),
             "plannedEnergyLedger": (_LEDGER_FIELDS, {}),
-            "equipmentProfile": (
-                _EQUIPMENT_FIELDS,
-                {"supportedControl": (_CONTROL_FIELDS, {})},
-            ),
+            "equipmentProfile": (_EQUIPMENT_FIELDS, {}),
             "periods": (
                 _PERIOD_FIELDS,
                 {
@@ -184,12 +181,7 @@ _EQUIPMENT_FIELDS = (
     "minimumCapacityPercentage", "maximumBatteryChargePowerWatts",
     "maximumBatteryDischargePowerWatts", "inverterMaximumChargePowerWatts",
     "inverterMaximumDischargePowerWatts", "maximumGridImportPowerWatts",
-    "maximumGridExportPowerWatts", "controlAdapterId", "supportedControl",
-    "productionExportEnabled", "safeFallbackId",
-)
-_CONTROL_FIELDS = (
-    "requiredCharging", "useGrid", "importForExport", "profitableExport",
-    "solarHeadroomExport",
+    "maximumGridExportPowerWatts", "controlAdapterId", "safeFallbackId",
 )
 _PERIOD_FIELDS = (
     "period", "date", "price", "shouldImport", "shouldUseGrid", "shouldExport",
@@ -243,6 +235,12 @@ def _adapt_object(
         for key in source
     ):
         raise Schema5ForecastError("schema-5 diagnostics contain a prohibited key")
+    if fields is _EQUIPMENT_FIELDS:
+        for retired_field in ("supportedControl", "productionExportEnabled"):
+            for alias in _aliases(retired_field):
+                value = source.get(alias)
+                if isinstance(value, Mapping):
+                    _reject_prohibited_retired_profile_keys(value)
     result: dict[str, object] = {}
     for field in fields:
         value = _alias_value(source, field)
@@ -265,6 +263,26 @@ def _adapt_object(
         else:
             result[field] = deepcopy(value)
     return result
+
+
+def _reject_prohibited_retired_profile_keys(
+    value: Mapping[object, object] | list[object],
+) -> None:
+    """Check discarded legacy profile objects before dropping them."""
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, (Mapping, list)):
+                _reject_prohibited_retired_profile_keys(item)
+        return
+    for key, child in value.items():
+        if (
+            isinstance(key, str)
+            and key.lower().replace("_", "").replace("-", "")
+            in _NORMALIZED_PROHIBITED_DIAGNOSTIC_KEYS
+        ):
+            raise Schema5ForecastError("schema-5 diagnostics contain a prohibited key")
+        if isinstance(child, (Mapping, list)):
+            _reject_prohibited_retired_profile_keys(child)
 
 
 @dataclass(frozen=True, slots=True)
@@ -490,10 +508,6 @@ def parse_schema5_forecast(payload: Mapping[str, object]) -> Schema5Forecast | N
     equipment_profile = _optional_complete_object(
         source, "equipmentProfile", _EQUIPMENT_FIELDS
     )
-    if equipment_profile is not None:
-        equipment_profile["supportedControl"] = _complete_object(
-            equipment_profile, "supportedControl", _CONTROL_FIELDS
-        )
     should_import = _boolean(source, "shouldImport")
     should_export = _should_export(source, schema_version=schema_version)
     if should_import and should_export is True:

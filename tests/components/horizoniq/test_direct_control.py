@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 
 from custom_components.horizoniq.direct_control import (
+    DirectForecastRejection,
     parse_live_command,
     parse_replay_command,
     validate_live_forecast,
@@ -55,7 +56,7 @@ def _snapshot(forecast: Forecast, sequence: int = 1) -> HorizonIQSnapshot:
     )
 
 
-def _profile(*, exports: bool = False) -> dict[str, object]:
+def _profile() -> dict[str, object]:
     return {
         "id": "sandbox-profile", "version": 1, "source": "registration",
         "displayName": "Sandbox profile", "batteryCapacityWh": 10_000,
@@ -67,11 +68,6 @@ def _profile(*, exports: bool = False) -> dict[str, object]:
         "maximumGridImportPowerWatts": 3_000,
         "maximumGridExportPowerWatts": 3_000,
         "controlAdapterId": "home-assistant-virtual-battery",
-        "supportedControl": {
-            "requiredCharging": True, "useGrid": True, "importForExport": True,
-            "profitableExport": exports, "solarHeadroomExport": exports,
-        },
-        "productionExportEnabled": exports,
         "safeFallbackId": "self-consumption-only",
     }
 
@@ -119,7 +115,7 @@ def _recommended_payload(
     """Build a generic recommendation with no downstream control contract."""
     payload = _payload(action="charge_required")
     payload["schemaVersion"] = 6
-    payload["equipmentProfile"] = _profile(exports=False)
+    payload["equipmentProfile"] = _profile()
     payload["shouldExport"] = action == "export_for_profit"
     payload["shouldImport"] = action in {"charge_required", "import_for_export"}
     periods = payload["periods"]
@@ -150,6 +146,87 @@ def test_live_charge_and_import_are_clamped_to_virtual_limits() -> None:
     )
     assert command.command.mode is OperatingMode.GRID_SETPOINT
     assert command.command.requested_grid_power_w == 2_000
+
+
+@pytest.mark.parametrize("schema_version", (5, 6))
+@pytest.mark.parametrize("action", ("charge_required", "import_for_export", "use_grid"))
+@pytest.mark.parametrize("legacy_value", ("absent", None, False, True, "malformed"))
+def test_live_charge_import_and_hold_ignore_retired_permissions(
+    schema_version: int, action: str, legacy_value: object
+) -> None:
+    """Physical limits and schema priorities govern executable live actions."""
+    payload = _payload(action=action)
+    payload["schemaVersion"] = schema_version
+    period = payload["periods"][0]
+    assert isinstance(period, dict)
+    if schema_version == 6:
+        payload["shouldExport"] = False
+        period["shouldExport"] = False
+        period["actionPriority"] = {
+            "charge_required": 1,
+            "import_for_export": 2,
+            "use_grid": 3,
+        }[action]
+    profile = payload["equipmentProfile"]
+    assert isinstance(profile, dict)
+    if legacy_value != "absent":
+        profile["supportedControl"] = legacy_value
+        profile["SupportedControl"] = {"requiredCharging": False}
+        profile["productionExportEnabled"] = legacy_value
+        profile["ProductionExportEnabled"] = not bool(legacy_value)
+
+    forecast = _coordinator_forecast(payload)
+    assert forecast is not None
+    command = parse_live_command(forecast, now_utc=NOW, config=CONFIG)
+    assert command.action == action
+    assert command.command.requested_grid_power_w == (
+        None if action == "use_grid" else 2_000
+    )
+    assert command.command.mode is (
+        OperatingMode.GRID_PRESERVATION
+        if action == "use_grid"
+        else OperatingMode.GRID_SETPOINT
+    )
+
+    period["actionPriority"] = 9
+    rejected = validate_live_forecast(
+        _coordinator_forecast(payload), now_utc=NOW, config=CONFIG
+    )
+    assert rejected.rejection is DirectForecastRejection.COMMAND_METADATA_INVALID
+
+
+def test_replay_and_virtual_export_need_no_profile_permission() -> None:
+    """Local export paths use existing authority and physical power limits."""
+    virtual = _coordinator_forecast(
+        _recommended_payload("export_for_profit", expected_export=1.0)
+    )
+    assert virtual is not None
+    virtual_result = validate_virtual_recommendation(
+        virtual, now_utc=NOW, config=CONFIG
+    )
+    assert virtual_result.command is not None
+    assert virtual_result.command.command.requested_grid_power_w == -2_000
+
+    replay = _payload(action="none", plan_kind="sandbox_replay")
+    period = replay["periods"][0]
+    assert isinstance(period, dict)
+    period.update(
+        simulationAction="export_for_solar_headroom",
+        executableAction="none",
+        commandId=None,
+        issuedAtUtc=None,
+        expiresAtUtc=None,
+        actionPriority=None,
+        expectedExport=1.0,
+    )
+    replay_command = parse_replay_command(replay, virtual_now_utc=NOW, config=CONFIG)
+    assert replay_command.command.requested_grid_power_w == -2_000
+    assert replay_command.command_id is None
+
+    live_export = _coordinator_forecast(_payload(action="export_for_profit"))
+    assert live_export is not None
+    rejection = validate_live_forecast(live_export, now_utc=NOW, config=CONFIG)
+    assert rejection.rejection is DirectForecastRejection.ACTION_INVALID
 
 
 def test_complete_schema5_fixture_normalizes_and_drives_direct_charge() -> None:
@@ -631,7 +708,7 @@ def test_replay_export_uses_half_hour_power_and_no_command_identity() -> None:
             "expectedExport": 1.0,
         }
     )
-    payload["equipmentProfile"] = _profile(exports=True)
+    payload["equipmentProfile"] = _profile()
     command = parse_replay_command(payload, virtual_now_utc=NOW, config=CONFIG)
     assert command.command.requested_grid_power_w == -2_000
     assert command.command_id is None

@@ -442,9 +442,6 @@ def normalize_direct_forecast(forecast: ForecastData) -> Forecast | None:
 def _normalize_direct_equipment_profile(
     source: EquipmentProfile,
 ) -> DirectEquipmentProfile:
-    controls = source.get("supportedControl")
-    if not isinstance(controls, Mapping):
-        raise ValueError("supportedControl")
     return DirectEquipmentProfile(
         identifier=_direct_text(source.get("id"), "equipmentProfile.id"),
         version=_direct_int(source.get("version"), "equipmentProfile.version"),
@@ -485,24 +482,6 @@ def _normalize_direct_equipment_profile(
         ),
         control_adapter_id=_direct_text(
             source.get("controlAdapterId"), "equipmentProfile.controlAdapterId"
-        ),
-        required_charging=_direct_bool(
-            controls.get("requiredCharging"), "supportedControl.requiredCharging"
-        ),
-        use_grid=_direct_bool(controls.get("useGrid"), "supportedControl.useGrid"),
-        import_for_export=_direct_bool(
-            controls.get("importForExport"), "supportedControl.importForExport"
-        ),
-        profitable_export=_direct_bool(
-            controls.get("profitableExport"), "supportedControl.profitableExport"
-        ),
-        solar_headroom_export=_direct_bool(
-            controls.get("solarHeadroomExport"),
-            "supportedControl.solarHeadroomExport",
-        ),
-        production_export_enabled=_direct_bool(
-            source.get("productionExportEnabled"),
-            "equipmentProfile.productionExportEnabled",
         ),
         safe_fallback_id=_direct_text(
             source.get("safeFallbackId"), "equipmentProfile.safeFallbackId"
@@ -585,12 +564,6 @@ def _direct_forecast_generation(value: object) -> float:
     if not 0 <= generation <= MAX_FORECAST_PERIOD_ENERGY_WH:
         raise ValueError("estimated_generation")
     return generation
-
-
-def _direct_bool(value: object, name: str) -> bool:
-    if not isinstance(value, bool):
-        raise ValueError(name)
-    return value
 
 
 def _direct_timestamp(value: object, name: str) -> datetime:

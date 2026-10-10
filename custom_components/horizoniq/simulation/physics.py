@@ -10,6 +10,16 @@ def _command(command: Command | None, when: datetime) -> tuple[OperatingMode, fl
     if command is None: return OperatingMode.SELF_CONSUMPTION, None, CommandStatus.FALLBACK_MISSING, "No command; self-consumption used."
     if command.expires_at_utc and command.expires_at_utc <= when: return OperatingMode.SELF_CONSUMPTION, None, CommandStatus.FALLBACK_EXPIRED, "Command expired; self-consumption used."
     if command.issued_at_utc and command.issued_at_utc > when: return OperatingMode.SELF_CONSUMPTION, None, CommandStatus.FALLBACK_STALE, "Command is not yet valid; self-consumption used."
+    if (
+        command.mode is OperatingMode.GRID_PRESERVATION
+        and command.requested_grid_power_w is not None
+    ):
+        return (
+            OperatingMode.SELF_CONSUMPTION,
+            None,
+            CommandStatus.FALLBACK_INVALID,
+            "Grid preservation command is invalid; self-consumption used.",
+        )
     if command.mode is OperatingMode.GRID_SETPOINT and (command.requested_grid_power_w is None or not math.isfinite(command.requested_grid_power_w)): return OperatingMode.SELF_CONSUMPTION, None, CommandStatus.FALLBACK_INVALID, "Grid setpoint is invalid; self-consumption used."
     return command.mode, command.requested_grid_power_w, CommandStatus.APPLIED, None
 def simulate_step(*, previous: BatteryState, elapsed_seconds: float, virtual_time_utc: datetime, command: Command | None, load_w: float, solar_w: float, config: BatteryConfig) -> StepResult:
@@ -20,7 +30,15 @@ def simulate_step(*, previous: BatteryState, elapsed_seconds: float, virtual_tim
     when = virtual_time_utc.astimezone(timezone.utc); start = min(config.capacity_wh, max(config.reserve_wh, previous.energy_wh)); mode, setpoint, status, reason = _command(command, when)
     if elapsed_seconds == 0:
         return StepResult(BatteryState(start), load_w-solar_w, 0., status, IntervalLedger(start_battery_energy_wh=start,end_battery_energy_wh=start), SimulationHealth.HEALTHY, reason)
-    wanted = 0. if mode is OperatingMode.IDLE else (setpoint + solar_w - load_w if mode is OperatingMode.GRID_SETPOINT else solar_w - load_w)
+    if mode is OperatingMode.IDLE:
+        wanted = 0.0
+    elif mode is OperatingMode.GRID_PRESERVATION:
+        wanted = max(0.0, solar_w - load_w)
+    elif mode is OperatingMode.GRID_SETPOINT:
+        assert setpoint is not None
+        wanted = setpoint + solar_w - load_w
+    else:
+        wanted = solar_w - load_w
     hours = elapsed_seconds / 3600.; battery = min(config.max_charge_power_w, max(-config.max_discharge_power_w, wanted))
     if battery >= 0:
         battery = min(battery, (config.capacity_wh-start)/(config.charge_efficiency*hours)); increase=battery*hours*config.charge_efficiency; decrease=0.; charge_loss=battery*hours-increase; discharge_loss=0.

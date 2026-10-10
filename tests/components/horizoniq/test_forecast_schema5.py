@@ -23,10 +23,17 @@ from custom_components.horizoniq.forecast_schema5 import (
 )
 from custom_components.horizoniq.coordinator import HorizonIQCoordinator
 from custom_components.horizoniq.coordinator_helpers import build_snapshot
+from custom_components.horizoniq.direct_control import (
+    DirectForecastRejection,
+    parse_live_command,
+    validate_live_forecast,
+)
+from custom_components.horizoniq.models import ForecastFreshness
 from custom_components.horizoniq.sensors.import_for_export import (
     ImportForExportDecisionSensor,
 )
 from custom_components.horizoniq.sensors.diagnostic import ForecastDetailSensor
+from custom_components.horizoniq.simulation.models import BatteryConfig, OperatingMode
 
 
 FIXTURE = Path(__file__).with_name("fixtures") / "direct_schema5_forecast.json"
@@ -106,7 +113,6 @@ def test_complete_schema5_contract_survives_strict_normalization() -> None:
         "effectiveAtUtc",
         "economicsAssumptions",
         "plannedEnergyLedger",
-        "equipmentProfile",
         "currentCapacity",
         "minCapacity",
         "targetCapacity",
@@ -121,6 +127,10 @@ def test_complete_schema5_contract_survives_strict_normalization() -> None:
         "saving",
     ):
         assert normalized[field] == payload[field]
+    physical_profile = dict(payload["equipmentProfile"])
+    physical_profile.pop("supportedControl")
+    physical_profile.pop("productionExportEnabled")
+    assert normalized["equipmentProfile"] == physical_profile
     period = normalized["periods"][0]
     source_period = payload["periods"][0]
     assert period["shouldExport"] is None
@@ -154,6 +164,139 @@ def test_complete_schema5_contract_survives_strict_normalization() -> None:
     ):
         assert period[field] == source_period[field]
     assert period["decisionTrace"] == source_period["decisionTrace"]
+
+
+@pytest.mark.parametrize("style", ("camel", "pascal", "snake"))
+@pytest.mark.parametrize("legacy_value", ("absent", None, False, True, "malformed"))
+def test_old_and_new_profiles_normalize_to_identical_physical_profile(
+    style: str, legacy_value: object
+) -> None:
+    """Retired aliases have no place in the canonical physical contract."""
+    new_payload = _payload()
+    profile = new_payload["equipmentProfile"]
+    assert isinstance(profile, dict)
+    profile.pop("supportedControl")
+    profile.pop("productionExportEnabled")
+    new_forecast = parse_schema5_forecast(new_payload)
+    assert new_forecast is not None
+
+    old_payload = (
+        deepcopy(new_payload)
+        if style == "camel"
+        else _wire_alias(new_payload, style)
+    )
+    profile_key = {
+        "camel": "equipmentProfile",
+        "pascal": "EquipmentProfile",
+        "snake": "equipment_profile",
+    }[style]
+    old_profile = old_payload[profile_key]
+    assert isinstance(old_profile, dict)
+    if legacy_value != "absent":
+        old_profile["supportedControl"] = legacy_value
+        old_profile["SupportedControl"] = {"requiredCharging": False}
+        old_profile["supported_control"] = {"useGrid": None}
+        old_profile["productionExportEnabled"] = legacy_value
+        old_profile["ProductionExportEnabled"] = not bool(legacy_value)
+    old_forecast = parse_schema5_forecast(old_payload)
+    assert old_forecast is not None
+    assert old_forecast.to_dict() == new_forecast.to_dict()
+    assert set(old_forecast.to_dict()["equipmentProfile"]) == set(profile)
+
+    conflicting = deepcopy(old_payload)
+    conflicting_profile = conflicting[profile_key]
+    assert isinstance(conflicting_profile, dict)
+    conflicting_profile[
+        "BatteryCapacityWh" if style == "camel" else "batteryCapacityWh"
+    ] = 9_999
+    with pytest.raises(Schema5ForecastError, match="Conflicting aliases"):
+        parse_schema5_forecast(conflicting)
+
+
+def test_retained_physical_profile_validation_is_unchanged() -> None:
+    """Missing, null, unsafe, and out-of-bounds physical limits still refuse control."""
+    payload = _payload()
+    profile = payload["equipmentProfile"]
+    assert isinstance(profile, dict)
+    profile.pop("supportedControl")
+    profile.pop("productionExportEnabled")
+    missing = deepcopy(payload)
+    del missing["equipmentProfile"]["batteryCapacityWh"]
+    with pytest.raises(Schema5ForecastError, match="batteryCapacityWh"):
+        parse_schema5_forecast(missing)
+
+    unsafe = deepcopy(payload)
+    unsafe["equipmentProfile"]["batteryCapacityWh"] = float("nan")
+    with pytest.raises(Schema5ForecastError, match="safe JSON object"):
+        parse_schema5_forecast(unsafe)
+
+    for invalid in (None, 0, -1):
+        malformed = deepcopy(payload)
+        malformed["equipmentProfile"]["batteryCapacityWh"] = invalid
+        result = validate_live_forecast(
+            build_snapshot(malformed).direct_forecast,
+            now_utc=datetime(2026, 7, 30, 12, tzinfo=timezone.utc),
+            config=BatteryConfig(10_000, 2_000, 2_000, 2_000),
+        )
+        assert result.rejection in {
+            DirectForecastRejection.MODEL_UNAVAILABLE,
+            DirectForecastRejection.PROFILE_INVALID,
+        }
+
+
+@pytest.mark.parametrize(
+    "alias",
+    (
+        "supportedControl", "SupportedControl", "supported_control",
+        "productionExportEnabled", "ProductionExportEnabled",
+        "production_export_enabled",
+    ),
+)
+@pytest.mark.parametrize("secret_key", ("apiKey", "registration_data", "function-key"))
+def test_retired_profile_aliases_reject_nested_diagnostic_secrets(
+    alias: str, secret_key: str
+) -> None:
+    """Discarded legacy profile maps still enforce diagnostic redaction."""
+    payload = _payload()
+    profile = payload["equipmentProfile"]
+    assert isinstance(profile, dict)
+    profile[alias] = {"extra": [[{"nested": {secret_key: "secret"}}]]}
+    with pytest.raises(Schema5ForecastError, match="prohibited key"):
+        parse_schema5_forecast(payload)
+
+
+def test_new_profile_survives_real_coordinator_refresh() -> None:
+    """A new schema-6 profile reaches typed direct control through refresh parsing."""
+    payload = _schema6_payload(should_export=False)
+    profile = payload["equipmentProfile"]
+    assert isinstance(profile, dict)
+    profile.pop("supportedControl")
+    profile.pop("productionExportEnabled")
+    coordinator = object.__new__(HorizonIQCoordinator)
+    coordinator._last_valid_schema5_forecast = None
+    snapshot = coordinator._build_snapshot_or_stale(payload)
+    assert snapshot.forecast_freshness is ForecastFreshness.FRESH
+    assert snapshot.direct_forecast is not None
+    command = parse_live_command(
+        snapshot.direct_forecast,
+        now_utc=datetime(2026, 7, 30, 12, tzinfo=timezone.utc),
+        config=BatteryConfig(10_000, 2_000, 2_000, 2_000),
+    )
+    assert command.command.mode is OperatingMode.GRID_SETPOINT
+    assert command.command.requested_grid_power_w == 2_000
+
+    malformed = deepcopy(payload)
+    del malformed["equipmentProfile"]["maximumGridImportPowerWatts"]
+    coordinator._latest_snapshot = snapshot
+    coordinator._publication_sequence = 0
+    coordinator.async_set_updated_data = MagicMock()
+    with pytest.raises(UpdateFailed, match="maximumGridImportPowerWatts"):
+        coordinator._build_snapshot_or_stale(malformed)
+    stale = coordinator._latest_snapshot
+    assert stale.forecast_freshness is ForecastFreshness.STALE
+    assert stale.direct_forecast is None
+    assert stale.schema5_forecast is not None
+    assert stale.schema5_forecast.plan_id == snapshot.schema5_forecast.plan_id
 
 
 def test_schema6_requires_and_preserves_backend_should_export() -> None:

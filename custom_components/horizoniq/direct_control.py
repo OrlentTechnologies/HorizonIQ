@@ -131,13 +131,11 @@ def parse_live_command(
     priority = _required_int(period.action_priority, "actionPriority")
     expected_priority = {
         "charge_required": 1,
-        "use_grid": 4,
-        "import_for_export": 5,
+        "use_grid": 3 if forecast.schema_version == 6 else 4,
+        "import_for_export": 2 if forecast.schema_version == 6 else 5,
     }[action]
-    if priority != expected_priority or not _direct_capability(
-        forecast.equipment_profile, action
-    ):
-        raise ValueError("Forecast action is unsupported by the returned profile")
+    if priority != expected_priority:
+        raise ValueError("Forecast actionPriority is invalid")
     command = _direct_command_from_action(
         action=action,
         period=period,
@@ -271,14 +269,6 @@ def validate_period_generation(period: DirectForecastPeriod) -> float:
     return generation
 
 
-def _direct_capability(profile: DirectEquipmentProfile, action: str) -> bool:
-    return {
-        "charge_required": profile.required_charging,
-        "use_grid": profile.use_grid,
-        "import_for_export": profile.import_for_export,
-    }[action]
-
-
 def parse_virtual_recommendation(
     forecast: Forecast | None,
     *,
@@ -362,7 +352,7 @@ def _direct_command_from_action(
     expires_at_utc: datetime,
 ) -> Command:
     if action == "use_grid":
-        return Command(OperatingMode.GRID_SETPOINT, 0.0, issued_at_utc, expires_at_utc)
+        return Command(OperatingMode.GRID_PRESERVATION, None, issued_at_utc, expires_at_utc)
     energy_kwh = _required_energy(
         period.expected_export_kwh
         if action == _VIRTUAL_EXPORT_ACTION
@@ -443,7 +433,6 @@ def parse_replay_command(
         remaining_hours=0.5,
         issued_at_utc=period_start,
         expires_at_utc=period_start + _HALF_HOUR,
-        replay=True,
     )
     return DirectCommand(
         command,
@@ -511,15 +500,8 @@ def _validate_profile(profile: Mapping[str, object]) -> None:
     reserve = _finite(profile.get("minimumCapacityPercentage"), "minimumCapacityPercentage")
     if not 0 <= reserve <= 1:
         raise ValueError("Forecast equipment profile reserve is invalid")
-    if not isinstance(profile.get("productionExportEnabled"), bool):
-        raise ValueError("Forecast export guard is invalid")
     if not _text(profile.get("safeFallbackId"), "safeFallbackId"):
         raise ValueError("Forecast fallback identity is invalid")
-    controls = profile.get("supportedControl")
-    if not isinstance(controls, Mapping) or set(controls) != {
-        "requiredCharging", "useGrid", "importForExport", "profitableExport", "solarHeadroomExport"
-    } or not all(isinstance(value, bool) for value in controls.values()):
-        raise ValueError("Forecast control capabilities are invalid")
 
 
 def _validate_period_diagnostics(period: Mapping[str, object]) -> None:
@@ -540,32 +522,12 @@ def _validate_null_live_command_fields(period: Mapping[str, object]) -> None:
             raise ValueError("No-op forecast contains command metadata")
 
 
-def _capability(
-    profile: Mapping[str, object], action: str, *, replay: bool = False
-) -> bool:
-    controls = profile["supportedControl"]
-    assert isinstance(controls, Mapping)
-    key = {
-        "charge_required": "requiredCharging",
-        "use_grid": "useGrid",
-        "import_for_export": "importForExport",
-        "export_for_profit": "profitableExport",
-        "export_for_solar_headroom": "solarHeadroomExport",
-    }[action]
-    return controls[key] is True and (
-        replay or not action.startswith("export_") or profile["productionExportEnabled"] is True
-    )
-
-
 def _command_from_action(
     *, action: str, period: Mapping[str, object], profile: Mapping[str, object], config: BatteryConfig,
     remaining_hours: float, issued_at_utc: datetime, expires_at_utc: datetime,
-    replay: bool = False,
 ) -> Command:
     if action == "use_grid":
-        return Command(OperatingMode.GRID_SETPOINT, 0.0, issued_at_utc, expires_at_utc)
-    if not _capability(profile, action, replay=replay):
-        raise ValueError("Forecast action is unsupported by the returned profile")
+        return Command(OperatingMode.GRID_PRESERVATION, None, issued_at_utc, expires_at_utc)
     energy_key = "expectedImport" if action in {"charge_required", "import_for_export"} else "expectedExport"
     energy_kwh = _positive(period.get(energy_key), energy_key)
     if not math.isfinite(remaining_hours) or remaining_hours <= 0:

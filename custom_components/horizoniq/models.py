@@ -24,16 +24,6 @@ class HorizonIQConfigData(TypedDict):
     forecast_device_token: str
 
 
-class SupportedControl(TypedDict):
-    """Exact schema-5 equipment-profile control capabilities."""
-
-    requiredCharging: bool
-    useGrid: bool
-    importForExport: bool
-    profitableExport: bool
-    solarHeadroomExport: bool
-
-
 class EquipmentProfile(TypedDict):
     """Exact camel-case schema-5 registration-owned equipment profile."""
 
@@ -50,8 +40,6 @@ class EquipmentProfile(TypedDict):
     maximumGridImportPowerWatts: float
     maximumGridExportPowerWatts: float
     controlAdapterId: str
-    supportedControl: SupportedControl
-    productionExportEnabled: bool
     safeFallbackId: str
 
 
@@ -72,12 +60,6 @@ class DirectEquipmentProfile:
     maximum_grid_import_power_watts: float
     maximum_grid_export_power_watts: float
     control_adapter_id: str
-    required_charging: bool
-    use_grid: bool
-    import_for_export: bool
-    profitable_export: bool
-    solar_headroom_export: bool
-    production_export_enabled: bool
     safe_fallback_id: str
 
 

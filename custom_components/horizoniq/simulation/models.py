@@ -5,7 +5,11 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 
-class OperatingMode(str, Enum): IDLE = "idle"; SELF_CONSUMPTION = "self_consumption"; GRID_SETPOINT = "grid_setpoint"
+class OperatingMode(str, Enum):
+    IDLE = "idle"
+    SELF_CONSUMPTION = "self_consumption"
+    GRID_SETPOINT = "grid_setpoint"
+    GRID_PRESERVATION = "grid_preservation"
 class CommandStatus(str, Enum): APPLIED = "applied"; NO_ACTION = "no_action"; AWAITING_FORECAST = "awaiting_forecast"; FALLBACK_MISSING = "fallback_missing"; FALLBACK_STALE = "fallback_stale"; FALLBACK_EXPIRED = "fallback_expired"; FALLBACK_INVALID = "fallback_invalid"
 class SimulationHealth(str, Enum): HEALTHY = "healthy"; UNHEALTHY = "unhealthy"
 ClockRateValue = Literal["paused", "1x", "10x", "60x", "240x"]

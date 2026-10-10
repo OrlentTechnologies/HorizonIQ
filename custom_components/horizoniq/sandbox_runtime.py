@@ -2299,6 +2299,11 @@ class HorizonIQEntryRuntime:
             raise ValueError("Stored profile cursor is invalid")
         if snapshot.active_command is not None:
             if (
+                snapshot.active_command.mode is OperatingMode.GRID_PRESERVATION
+                and snapshot.active_command.requested_grid_power_w is not None
+            ):
+                raise ValueError("Stored command is invalid")
+            if (
                 snapshot.active_command.requested_grid_power_w is not None
                 and not math.isfinite(snapshot.active_command.requested_grid_power_w)
             ):
@@ -4168,7 +4173,7 @@ class HorizonIQEntryRuntime:
         """Map only local synthetic command state to the frozen numeric enum."""
         if self._command is None or self._command.mode is OperatingMode.SELF_CONSUMPTION:
             return VictronOperatingState.SELF_CONSUMPTION
-        if self._command.mode is OperatingMode.GRID_SETPOINT:
+        if self._command.mode in (OperatingMode.GRID_SETPOINT, OperatingMode.GRID_PRESERVATION):
             return VictronOperatingState.GRID_SETPOINT
         return VictronOperatingState.IDLE
 
