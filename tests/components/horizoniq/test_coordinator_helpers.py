@@ -1,5 +1,6 @@
 """Tests for payload normalization helpers."""
 
+from copy import deepcopy
 import json
 from pathlib import Path
 
@@ -559,3 +560,210 @@ def test_legacy_direct_capable_and_non_direct_payloads_keep_the_freshness_matrix
     assert direct.direct_forecast is not None
     assert diagnostic.forecast_freshness is ForecastFreshness.MISSING
     assert diagnostic.direct_forecast is None
+
+
+@pytest.mark.parametrize("schema_version", (5, 6))
+@pytest.mark.parametrize(
+    "alias", ("RegistrationData", "registrationData", "registration_data")
+)
+@pytest.mark.parametrize(
+    ("wrapper", "location"),
+    (
+        (None, "flat"),
+        ("Forecast", "envelope"),
+        ("Forecast", "nested"),
+        ("forecast", "envelope"),
+        ("forecast", "nested"),
+        ("forecastEntity", "envelope"),
+        ("forecastEntity", "nested"),
+    ),
+)
+def test_schema56_registration_metadata_is_kept_private(
+    schema_version: int, alias: str, wrapper: str | None, location: str
+) -> None:
+    """All supported transport shapes keep the opaque credential private."""
+    credential = "synthetic-registration+/=&? internal space"
+    forecast = _schema_payload() if schema_version == 5 else _schema6_payload()
+    baseline = build_snapshot(deepcopy(forecast))
+    payload = forecast if wrapper is None else {wrapper: forecast}
+    metadata_source = forecast if location in {"flat", "nested"} else payload
+    metadata_source[alias] = f" \t{credential}\n "
+    original = deepcopy(payload)
+
+    snapshot = build_snapshot(payload)
+
+    assert payload == original
+    assert snapshot.forecast_freshness is ForecastFreshness.FRESH
+    assert snapshot.registration_data == credential
+    assert snapshot.schema5_forecast is not None
+    assert snapshot.direct_forecast is not None
+    assert baseline.schema5_forecast is not None
+    assert snapshot.direct_forecast.registration_data == ""
+    assert snapshot.forecast == baseline.forecast
+    assert snapshot.schema5_forecast.to_dict() == baseline.schema5_forecast.to_dict()
+    assert snapshot.direct_forecast == baseline.direct_forecast
+    assert snapshot.forecast_periods == baseline.forecast_periods
+    assert snapshot.registration == baseline.registration == {}
+    assert credential not in repr(
+        (
+            snapshot.forecast,
+            snapshot.schema5_forecast.to_dict(),
+            snapshot.direct_forecast,
+            snapshot.forecast_periods,
+            snapshot.registration,
+        )
+    )
+
+
+@pytest.mark.parametrize("schema_version", (5, 6))
+@pytest.mark.parametrize(
+    "metadata",
+    (
+        pytest.param({}, id="absent"),
+        pytest.param({"registrationData": None}, id="null"),
+        pytest.param({"registrationData": ""}, id="empty"),
+        pytest.param({"registrationData": " \t\n "}, id="whitespace"),
+        pytest.param({"registrationData": True}, id="bool"),
+        pytest.param({"registrationData": 7}, id="integer"),
+        pytest.param({"registrationData": 1.5}, id="float"),
+        pytest.param({"registrationData": []}, id="empty-list"),
+        pytest.param({"registrationData": ["opaque"]}, id="list"),
+        pytest.param({"registrationData": [None]}, id="null-list"),
+        pytest.param({"registrationData": ["opaque", None]}, id="mixed-list"),
+        pytest.param({"registrationData": {}}, id="empty-mapping"),
+        pytest.param({"registrationData": {"opaque": "value"}}, id="mapping"),
+    ),
+)
+def test_schema56_missing_or_invalid_registration_metadata_is_ignored(
+    schema_version: int, metadata: dict[str, object]
+) -> None:
+    """Invalid optional metadata leaves the complete accepted plan unchanged."""
+    forecast = _schema_payload() if schema_version == 5 else _schema6_payload()
+    baseline = build_snapshot(deepcopy(forecast))
+    payload = {**forecast, **deepcopy(metadata)}
+    original = deepcopy(payload)
+
+    snapshot = build_snapshot(payload)
+
+    assert payload == original
+    assert snapshot.registration_data is None
+    assert snapshot.forecast_freshness is ForecastFreshness.FRESH
+    assert snapshot == baseline
+
+
+@pytest.mark.parametrize("schema_version", (5, 6))
+@pytest.mark.parametrize("wrapper", ("Forecast", "forecast", "forecastEntity"))
+@pytest.mark.parametrize(
+    ("envelope_metadata", "nested_metadata", "expected"),
+    (
+        pytest.param(
+            {
+                "registration_data": "third",
+                "registrationData": "second",
+                "RegistrationData": " first ",
+            },
+            {},
+            "first",
+            id="all-aliases",
+        ),
+        pytest.param(
+            {"registration_data": "third", "registrationData": " second "},
+            {},
+            "second",
+            id="camel-before-snake",
+        ),
+        pytest.param(
+            {"RegistrationData": " same ", "registrationData": "same"},
+            {},
+            "same",
+            id="duplicate",
+        ),
+        pytest.param(
+            {"registration_data": " envelope "},
+            {"RegistrationData": "nested"},
+            "envelope",
+            id="envelope-first",
+        ),
+        pytest.param(
+            {"RegistrationData": None, "registrationData": "lower"},
+            {"RegistrationData": "nested"},
+            None,
+            id="null-blocks-fallback",
+        ),
+        pytest.param(
+            {"registrationData": [None], "registration_data": "lower"},
+            {"RegistrationData": "nested"},
+            None,
+            id="invalid-blocks-fallback",
+        ),
+        pytest.param(
+            {"RegistrationData": " \t ", "registration_data": "lower"},
+            {"RegistrationData": "nested"},
+            None,
+            id="blank-blocks-fallback",
+        ),
+        pytest.param(
+            {},
+            {
+                "registration_data": "third",
+                "registrationData": "second",
+                "RegistrationData": " nested ",
+            },
+            "nested",
+            id="absent-envelope",
+        ),
+        pytest.param(
+            {},
+            {"RegistrationData": False, "registrationData": "lower"},
+            None,
+            id="nested-invalid-blocks-fallback",
+        ),
+    ),
+)
+def test_schema56_registration_metadata_uses_existing_alias_precedence(
+    schema_version: int,
+    wrapper: str,
+    envelope_metadata: dict[str, object],
+    nested_metadata: dict[str, object],
+    expected: str | None,
+) -> None:
+    """First present alias wins, even when it blocks otherwise valid metadata."""
+    forecast = _schema_payload() if schema_version == 5 else _schema6_payload()
+    forecast.update(deepcopy(nested_metadata))
+    payload = {wrapper: forecast, **deepcopy(envelope_metadata)}
+    original = deepcopy(payload)
+
+    snapshot = build_snapshot(payload)
+
+    assert snapshot.registration_data == expected
+    assert snapshot.forecast_freshness is ForecastFreshness.FRESH
+    assert payload == original
+
+
+@pytest.mark.parametrize("schema_version", (5, 6))
+def test_schema56_registration_metadata_is_preserved_without_direct_model(
+    schema_version: int,
+) -> None:
+    """Credential transport does not depend on an optional equipment profile."""
+    credential = "synthetic-registration+/=&? internal space"
+    forecast = _schema_payload() if schema_version == 5 else _schema6_payload()
+    forecast.pop("equipmentProfile")
+    forecast["registrationData"] = f" {credential} "
+    original = deepcopy(forecast)
+
+    snapshot = build_snapshot(forecast)
+
+    assert snapshot.registration_data == credential
+    assert snapshot.forecast_freshness is ForecastFreshness.FRESH
+    assert snapshot.schema5_forecast is not None
+    assert not snapshot.schema5_forecast.stale
+    assert snapshot.direct_forecast is None
+    assert forecast == original
+    assert credential not in repr(
+        (
+            snapshot.forecast,
+            snapshot.schema5_forecast.to_dict(),
+            snapshot.forecast_periods,
+            snapshot.registration,
+        )
+    )

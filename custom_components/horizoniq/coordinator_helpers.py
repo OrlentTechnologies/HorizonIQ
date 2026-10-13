@@ -782,6 +782,12 @@ def _schema5_snapshot(
     payload: Mapping[str, object],
 ) -> HorizonIQSnapshot:
     """Derive every schema-5 consumer view from the one accepted contract."""
+    raw_registration_data = _extract_registration_data_value(payload)
+    registration_data = (
+        raw_registration_data.strip() or None
+        if isinstance(raw_registration_data, str)
+        else None
+    )
     canonical = schema5_forecast.to_dict()
     forecast = dict(normalize_forecast(canonical, _canonical_schema5=True))
     periods = forecast.get("periods", [])
@@ -805,6 +811,7 @@ def _schema5_snapshot(
         charging_cost=schema5_forecast.charging_cost,
         saving=schema5_forecast.saving,
         forecast_hash=forecast_hash,
+        registration_data=registration_data,
         forecast_cadence_minutes=schema5_forecast.forecast_cadence_minutes,
         forecast_freshness=ForecastFreshness.FRESH,
     )

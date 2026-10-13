@@ -3,11 +3,15 @@
 import asyncio
 from datetime import timedelta
 import json
+import logging
 from pathlib import Path
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 import pytest
 from homeassistant.helpers.update_coordinator import UpdateFailed
+from yarl import URL
 
 from custom_components.horizoniq.const import (
     CONF_FORECAST_FUNCTION_KEY,
@@ -25,9 +29,587 @@ from custom_components.horizoniq.const import (
 )
 from custom_components.horizoniq.coordinator import HorizonIQCoordinator
 from custom_components.horizoniq.models import ForecastFreshness, HorizonIQSnapshot
+from custom_components.horizoniq.sensors.diagnostic import ForecastDetailSensor
 
 
 FIXTURE = Path(__file__).with_name("fixtures") / "direct_schema5_forecast.json"
+
+REGISTRATION_SENTINEL = "synthetic-registration+/=&? internal space"
+
+
+def _flat_registration_forecast(schema_version: int) -> dict[str, object]:
+    """Return a complete backend-style flat plan with transport hash metadata."""
+    if schema_version == 6:
+        payload = _schema6_payload()["Forecast"]
+        assert isinstance(payload, dict)
+    else:
+        payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    return {**payload, "hash": "fresh-hash"}
+
+
+@pytest.mark.parametrize("schema_version", (5, 6))
+@pytest.mark.parametrize("fetch_path", ("normal", "virtual"))
+async def test_schema56_registration_data_persists_and_is_sent_on_next_request(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+    aioclient_mock,
+    schema_version: int,
+    fetch_path: str,
+) -> None:
+    """Accepted private metadata reaches real storage and the next HTTP query."""
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "4320")
+    original_entry = dict(mock_config_entry.data)
+    coordinator = HorizonIQCoordinator(
+        hass,
+        mock_config_entry,
+        entry_data["url"],
+        entry_data["api_key"],
+        entry_data["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+    )
+    fetch = (
+        coordinator._async_update_data
+        if fetch_path == "normal"
+        else coordinator.async_fetch_sandbox_forecast
+    )
+    assert coordinator.registration_data == ""
+    assert mock_config_entry.data[CONF_REGISTRATION_DATA] == ""
+    payload = _flat_registration_forecast(schema_version)
+    payload["registrationData"] = f" \t{REGISTRATION_SENTINEL}\n "
+    # Exact URL matching includes blank query values and avoids response reuse.
+    aioclient_mock.get(
+        re.compile(
+            rf"\A{re.escape(str(URL(coordinator._build_request_url('4320'))))}\Z"
+        ),
+        json=payload,
+    )
+
+    with patch.object(
+        hass.config_entries,
+        "async_update_entry",
+        wraps=hass.config_entries.async_update_entry,
+    ) as update_entry:
+        snapshot = await fetch()
+        first_query = parse_qs(
+            urlparse(str(aioclient_mock.mock_calls[0][1])).query,
+            keep_blank_values=True,
+        )
+        assert first_query["registrationData"] == [""]
+        assert first_query["hash"] == [""]
+        assert first_query["currentBatteryCapacity"] == ["4320"]
+        assert snapshot.forecast_freshness is ForecastFreshness.FRESH
+        assert snapshot.registration_data == REGISTRATION_SENTINEL
+        assert coordinator.registration_data == REGISTRATION_SENTINEL
+        assert mock_config_entry.data[CONF_REGISTRATION_DATA] == REGISTRATION_SENTINEL
+        update_entry.assert_called_once()
+
+        aioclient_mock.get(
+            re.compile(
+                rf"\A{re.escape(str(URL(coordinator._build_request_url('4320'))))}\Z"
+            ),
+            json=_flat_registration_forecast(schema_version),
+        )
+        repeated = await fetch()
+        update_entry.assert_called_once()
+
+    assert aioclient_mock.call_count == 2
+    second_query = parse_qs(
+        urlparse(str(aioclient_mock.mock_calls[1][1])).query,
+        keep_blank_values=True,
+    )
+    assert second_query["registrationData"] == [REGISTRATION_SENTINEL]
+    assert second_query["hash"] == ["fresh-hash"]
+    assert second_query["currentBatteryCapacity"] == ["4320"]
+    assert repeated.forecast_freshness is ForecastFreshness.FRESH
+    assert repeated.registration_data is None
+    assert coordinator.registration_data == REGISTRATION_SENTINEL
+    assert mock_config_entry.data == {
+        **original_entry,
+        CONF_HASH: "fresh-hash",
+        CONF_REGISTRATION_DATA: REGISTRATION_SENTINEL,
+    }
+
+
+@pytest.mark.parametrize("schema_version", (5, 6))
+@pytest.mark.parametrize("fetch_path", ("normal", "virtual"))
+async def test_schema56_registration_data_rotates_without_hash_change(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+    aioclient_mock,
+    schema_version: int,
+    fetch_path: str,
+) -> None:
+    """A renewed credential replaces storage even when the plan hash is stable."""
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "4320")
+    original_entry = dict(mock_config_entry.data)
+    coordinator = HorizonIQCoordinator(
+        hass,
+        mock_config_entry,
+        entry_data["url"],
+        entry_data["api_key"],
+        entry_data["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+    )
+    fetch = (
+        coordinator._async_update_data
+        if fetch_path == "normal"
+        else coordinator.async_fetch_sandbox_forecast
+    )
+    renewed = f"{REGISTRATION_SENTINEL} renewed"
+    with patch.object(
+        hass.config_entries,
+        "async_update_entry",
+        wraps=hass.config_entries.async_update_entry,
+    ) as update_entry:
+        for credential in (REGISTRATION_SENTINEL, renewed):
+            payload = _flat_registration_forecast(schema_version)
+            payload["registrationData"] = f" {credential} "
+            aioclient_mock.get(
+                re.compile(
+                    r"\A"
+                    rf"{re.escape(str(URL(coordinator._build_request_url('4320'))))}\Z"
+                ),
+                json=payload,
+            )
+            snapshot = await fetch()
+            assert snapshot.forecast_freshness is ForecastFreshness.FRESH
+            assert snapshot.registration_data == credential
+            assert coordinator.registration_data == credential
+            assert mock_config_entry.data[CONF_REGISTRATION_DATA] == credential
+            assert coordinator.last_hash == "fresh-hash"
+            assert mock_config_entry.data[CONF_HASH] == "fresh-hash"
+        assert update_entry.call_count == 2
+        aioclient_mock.get(
+            re.compile(
+                rf"\A{re.escape(str(URL(coordinator._build_request_url('4320'))))}\Z"
+            ),
+            json=_flat_registration_forecast(schema_version),
+        )
+        await fetch()
+        assert update_entry.call_count == 2
+
+    assert aioclient_mock.call_count == 3
+    queries = [
+        parse_qs(urlparse(str(call[1])).query, keep_blank_values=True)
+        for call in aioclient_mock.mock_calls
+    ]
+    assert [query["registrationData"] for query in queries] == [
+        [""], [REGISTRATION_SENTINEL], [renewed],
+    ]
+    assert [query["hash"] for query in queries] == [
+        [""], ["fresh-hash"], ["fresh-hash"],
+    ]
+    assert all(query["currentBatteryCapacity"] == ["4320"] for query in queries)
+    assert mock_config_entry.data == {
+        **original_entry,
+        CONF_HASH: "fresh-hash",
+        CONF_REGISTRATION_DATA: renewed,
+    }
+
+
+@pytest.mark.parametrize("schema_version", (5, 6))
+@pytest.mark.parametrize("fetch_path", ("normal", "virtual"))
+async def test_schema56_registration_data_survives_coordinator_reload(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+    aioclient_mock,
+    schema_version: int,
+    fetch_path: str,
+) -> None:
+    """A fresh coordinator reads its credential from the actual persisted entry."""
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "4320")
+    coordinator = HorizonIQCoordinator(
+        hass,
+        mock_config_entry,
+        entry_data["url"],
+        entry_data["api_key"],
+        entry_data["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+    )
+    payload = _flat_registration_forecast(schema_version)
+    payload["registrationData"] = REGISTRATION_SENTINEL
+    aioclient_mock.get(
+        re.compile(
+            rf"\A{re.escape(str(URL(coordinator._build_request_url('4320'))))}\Z"
+        ),
+        json=payload,
+    )
+    fetch = (
+        coordinator._async_update_data
+        if fetch_path == "normal"
+        else coordinator.async_fetch_sandbox_forecast
+    )
+    await fetch()
+    renewed = f"{REGISTRATION_SENTINEL} renewed"
+    renewal = _flat_registration_forecast(schema_version)
+    renewal["registrationData"] = renewed
+    aioclient_mock.get(
+        re.compile(
+            rf"\A{re.escape(str(URL(coordinator._build_request_url('4320'))))}\Z"
+        ),
+        json=renewal,
+    )
+    await fetch()
+    persisted_entry = dict(mock_config_entry.data)
+    assert persisted_entry[CONF_REGISTRATION_DATA] == renewed
+    assert persisted_entry[CONF_HASH] == "fresh-hash"
+
+    reloaded = HorizonIQCoordinator(
+        hass,
+        mock_config_entry,
+        persisted_entry["url"],
+        persisted_entry["api_key"],
+        persisted_entry["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+        initial_hash=persisted_entry[CONF_HASH],
+        initial_registration=persisted_entry[CONF_REGISTRATION_DATA],
+    )
+    aioclient_mock.get(
+        re.compile(
+            rf"\A{re.escape(str(URL(reloaded._build_request_url('4320'))))}\Z"
+        ),
+        json=_flat_registration_forecast(schema_version),
+    )
+    reload_fetch = (
+        reloaded._async_update_data
+        if fetch_path == "normal"
+        else reloaded.async_fetch_sandbox_forecast
+    )
+    with patch.object(
+        hass.config_entries,
+        "async_update_entry",
+        wraps=hass.config_entries.async_update_entry,
+    ) as update_entry:
+        snapshot = await reload_fetch()
+        update_entry.assert_not_called()
+
+    assert aioclient_mock.call_count == 3
+    query = parse_qs(
+        urlparse(str(aioclient_mock.mock_calls[-1][1])).query,
+        keep_blank_values=True,
+    )
+    assert query["registrationData"] == [renewed]
+    assert query["hash"] == ["fresh-hash"]
+    assert query["currentBatteryCapacity"] == ["4320"]
+    assert snapshot.forecast_freshness is ForecastFreshness.FRESH
+    assert reloaded.registration_data == renewed
+    assert mock_config_entry.data == persisted_entry
+
+
+@pytest.mark.parametrize("schema_version", (5, 6))
+@pytest.mark.parametrize("fetch_path", ("normal", "virtual"))
+@pytest.mark.parametrize(
+    "metadata",
+    (
+        pytest.param({}, id="absent"),
+        pytest.param({"registrationData": None}, id="null"),
+        pytest.param({"registrationData": ""}, id="empty"),
+        pytest.param({"registrationData": " \t\n "}, id="whitespace"),
+        pytest.param({"registrationData": False}, id="bool"),
+        pytest.param({"registrationData": 7}, id="integer"),
+        pytest.param({"registrationData": 1.5}, id="float"),
+        pytest.param({"registrationData": []}, id="empty-list"),
+        pytest.param({"registrationData": ["opaque"]}, id="list"),
+        pytest.param({"registrationData": [None]}, id="null-list"),
+        pytest.param({"registrationData": ["opaque", None]}, id="mixed-list"),
+        pytest.param({"registrationData": {}}, id="empty-mapping"),
+        pytest.param({"registrationData": {"opaque": "value"}}, id="mapping"),
+    ),
+)
+async def test_schema56_absent_or_invalid_registration_metadata_keeps_cached_value(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+    aioclient_mock,
+    schema_version: int,
+    fetch_path: str,
+    metadata: dict[str, object],
+) -> None:
+    """Invalid optional metadata accepts the plan without clearing or rewriting."""
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "4320")
+    coordinator = HorizonIQCoordinator(
+        hass,
+        mock_config_entry,
+        entry_data["url"],
+        entry_data["api_key"],
+        entry_data["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+    )
+    fetch = (
+        coordinator._async_update_data
+        if fetch_path == "normal"
+        else coordinator.async_fetch_sandbox_forecast
+    )
+    accepted = _flat_registration_forecast(schema_version)
+    accepted["registrationData"] = REGISTRATION_SENTINEL
+    aioclient_mock.get(
+        re.compile(
+            rf"\A{re.escape(str(URL(coordinator._build_request_url('4320'))))}\Z"
+        ),
+        json=accepted,
+    )
+    baseline = await fetch()
+    persisted_entry = dict(mock_config_entry.data)
+    payload = {**_flat_registration_forecast(schema_version), **metadata}
+    aioclient_mock.get(
+        re.compile(
+            rf"\A{re.escape(str(URL(coordinator._build_request_url('4320'))))}\Z"
+        ),
+        json=payload,
+    )
+
+    with patch.object(
+        hass.config_entries,
+        "async_update_entry",
+        wraps=hass.config_entries.async_update_entry,
+    ) as update_entry:
+        snapshot = await fetch()
+        update_entry.assert_not_called()
+        assert snapshot.registration_data is None
+        assert snapshot.forecast_freshness is ForecastFreshness.FRESH
+        assert snapshot.schema5_forecast == baseline.schema5_forecast
+        assert snapshot.forecast == baseline.forecast
+        assert coordinator.registration_data == REGISTRATION_SENTINEL
+        assert mock_config_entry.data == persisted_entry
+
+        # The same registered HTTP response also checks the next actual request.
+        await fetch()
+        update_entry.assert_not_called()
+
+    assert aioclient_mock.call_count == 3
+    for call in aioclient_mock.mock_calls[1:]:
+        query = parse_qs(urlparse(str(call[1])).query, keep_blank_values=True)
+        assert query["registrationData"] == [REGISTRATION_SENTINEL]
+        assert query["hash"] == ["fresh-hash"]
+        assert query["currentBatteryCapacity"] == ["4320"]
+    assert coordinator.registration_data == REGISTRATION_SENTINEL
+    assert mock_config_entry.data == persisted_entry
+
+
+@pytest.mark.parametrize("schema_version", (5, 6))
+@pytest.mark.parametrize("fetch_path", ("normal", "virtual"))
+@pytest.mark.parametrize("rejection", ("malformed", "unauthorized", "http-failure"))
+async def test_schema56_rejected_responses_do_not_replace_registration_data(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+    aioclient_mock,
+    schema_version: int,
+    fetch_path: str,
+    rejection: str,
+) -> None:
+    """Rejected HTTP/plan metadata never replaces an already accepted credential."""
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "4320")
+    coordinator = HorizonIQCoordinator(
+        hass,
+        mock_config_entry,
+        entry_data["url"],
+        entry_data["api_key"],
+        entry_data["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+    )
+    fetch = (
+        coordinator._async_update_data
+        if fetch_path == "normal"
+        else coordinator.async_fetch_sandbox_forecast
+    )
+    accepted = _flat_registration_forecast(schema_version)
+    accepted["registrationData"] = REGISTRATION_SENTINEL
+    aioclient_mock.get(
+        re.compile(
+            rf"\A{re.escape(str(URL(coordinator._build_request_url('4320'))))}\Z"
+        ),
+        json=accepted,
+    )
+    await fetch()
+    persisted_entry = dict(mock_config_entry.data)
+    replacement = f"{REGISTRATION_SENTINEL} rejected"
+    offered = _flat_registration_forecast(schema_version)
+    offered["registrationData"] = replacement
+    status = 200
+    if rejection == "malformed":
+        offered.pop("planId")
+    elif rejection == "unauthorized":
+        status = 401
+        offered = {
+            "AuthorizationStatus": "unauthorized",
+            "registrationData": replacement,
+        }
+    else:
+        status = 500
+    aioclient_mock.get(
+        re.compile(
+            rf"\A{re.escape(str(URL(coordinator._build_request_url('4320'))))}\Z"
+        ),
+        json=offered,
+        status=status,
+    )
+
+    with patch.object(
+        hass.config_entries,
+        "async_update_entry",
+        wraps=hass.config_entries.async_update_entry,
+    ) as update_entry:
+        if rejection == "unauthorized":
+            stale = await fetch()
+            assert stale.forecast_freshness is ForecastFreshness.STALE
+            assert stale.direct_forecast is None
+            assert stale.schema5_forecast is not None and stale.schema5_forecast.stale
+            assert stale.trial["authorization_status"] == "unauthorized"
+        else:
+            reason = (
+                "Malformed schema-5 forecast"
+                if rejection == "malformed"
+                else "API returned status 500"
+            )
+            with pytest.raises(UpdateFailed, match=reason):
+                await fetch()
+            assert coordinator.data.forecast_freshness is ForecastFreshness.STALE
+            assert coordinator.data.direct_forecast is None
+        update_entry.assert_not_called()
+        assert coordinator.registration_data == REGISTRATION_SENTINEL
+        assert mock_config_entry.data == persisted_entry
+        rejected_query = parse_qs(
+            urlparse(str(aioclient_mock.mock_calls[-1][1])).query,
+            keep_blank_values=True,
+        )
+        assert rejected_query["registrationData"] == [REGISTRATION_SENTINEL]
+        assert aioclient_mock.call_count == 2
+
+        rejected_calls = tuple(aioclient_mock.mock_calls)
+        aioclient_mock.clear_requests()
+        aioclient_mock.get(
+            re.compile(
+                rf"\A{re.escape(str(URL(coordinator._build_request_url('4320'))))}\Z"
+            ),
+            json=_flat_registration_forecast(schema_version),
+        )
+        recovered = await fetch()
+        update_entry.assert_not_called()
+
+    assert aioclient_mock.call_count == 1
+    all_calls = [*rejected_calls, *aioclient_mock.mock_calls]
+    assert len(all_calls) == 3
+    queries = [
+        parse_qs(urlparse(str(call[1])).query, keep_blank_values=True)
+        for call in all_calls
+    ]
+    assert [query["registrationData"] for query in queries] == [
+        [""], [REGISTRATION_SENTINEL], [REGISTRATION_SENTINEL],
+    ]
+    assert [query["hash"] for query in queries] == [
+        [""], ["fresh-hash"], ["fresh-hash"],
+    ]
+    assert all(query["currentBatteryCapacity"] == ["4320"] for query in queries)
+    query = parse_qs(
+        urlparse(str(aioclient_mock.mock_calls[-1][1])).query,
+        keep_blank_values=True,
+    )
+    assert query["registrationData"] == [REGISTRATION_SENTINEL]
+    assert query["hash"] == ["fresh-hash"]
+    assert query["currentBatteryCapacity"] == ["4320"]
+    assert recovered.forecast_freshness is ForecastFreshness.FRESH
+    assert recovered.registration_data is None
+    assert coordinator.registration_data == REGISTRATION_SENTINEL
+    assert mock_config_entry.data == persisted_entry
+
+
+@pytest.mark.parametrize("schema_version", (5, 6))
+@pytest.mark.parametrize("fetch_path", ("normal", "virtual"))
+async def test_schema56_cached_registration_is_not_exposed_by_sensors_or_logs(
+    hass,
+    mock_config_entry,
+    entry_data: dict[str, str],
+    aioclient_mock,
+    caplog,
+    schema_version: int,
+    fetch_path: str,
+) -> None:
+    """Real credential reuse stays out of public forecast, sensor and DEBUG logs."""
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "4320")
+    coordinator = HorizonIQCoordinator(
+        hass,
+        mock_config_entry,
+        entry_data["url"],
+        entry_data["api_key"],
+        entry_data["battery_capacity_sensor"],
+        SANDBOX_ENVIRONMENT,
+    )
+    fetch = (
+        coordinator._async_update_data
+        if fetch_path == "normal"
+        else coordinator.async_fetch_sandbox_forecast
+    )
+    payload = _flat_registration_forecast(schema_version)
+    payload["registrationData"] = REGISTRATION_SENTINEL
+    aioclient_mock.get(
+        re.compile(
+            rf"\A{re.escape(str(URL(coordinator._build_request_url('4320'))))}\Z"
+        ),
+        json=payload,
+    )
+    with caplog.at_level(logging.DEBUG):
+        snapshot = await fetch()
+        coordinator.async_set_updated_data(snapshot)
+        sensor = ForecastDetailSensor(
+            coordinator, mock_config_entry.entry_id, SANDBOX_ENVIRONMENT
+        )
+        accepted_sensor_output = (sensor.native_value, sensor.extra_state_attributes)
+        aioclient_mock.get(
+            re.compile(
+                rf"\A{re.escape(str(URL(coordinator._build_request_url('4320'))))}\Z"
+            ),
+            json=_flat_registration_forecast(schema_version),
+        )
+        repeated = await fetch()
+        coordinator.async_set_updated_data(repeated)
+        public_output = (sensor.native_value, sensor.extra_state_attributes)
+
+    assert aioclient_mock.call_count == 2
+    query = parse_qs(
+        urlparse(str(aioclient_mock.mock_calls[-1][1])).query,
+        keep_blank_values=True,
+    )
+    assert query["registrationData"] == [REGISTRATION_SENTINEL]
+    assert snapshot.registration_data == REGISTRATION_SENTINEL
+    assert coordinator.registration_data == REGISTRATION_SENTINEL
+    assert snapshot.forecast_freshness is ForecastFreshness.FRESH
+    assert repeated.forecast_freshness is ForecastFreshness.FRESH
+    assert snapshot.schema5_forecast is not None
+    assert snapshot.direct_forecast is not None
+    assert snapshot.direct_forecast.registration_data == ""
+    assert sensor.native_value == len(snapshot.forecast_periods) > 0
+    assert accepted_sensor_output == public_output
+    assert public_output[1]["forecast"] == snapshot.schema5_forecast.to_dict()
+    assert REGISTRATION_SENTINEL not in repr(public_output)
+    assert REGISTRATION_SENTINEL not in repr(
+        (
+            snapshot.forecast,
+            snapshot.schema5_forecast.to_dict(),
+            snapshot.direct_forecast,
+            snapshot.forecast_periods,
+            snapshot.registration,
+        )
+    )
+    messages = [record.getMessage() for record in caplog.records]
+    assert REGISTRATION_SENTINEL not in "\n".join(messages)
+    assert quote_plus(REGISTRATION_SENTINEL) not in "\n".join(messages)
+    request_messages = [
+        message
+        for message in messages
+        if message.startswith("Requesting HorizonIQ forecast")
+    ]
+    if fetch_path == "normal":
+        assert len(request_messages) == 2
+    for message in request_messages:
+        assert "registrationData=" not in message
+        assert "code=" not in message
+        assert "?" not in message
+        assert "#" not in message
+        assert "https://example.com/api/Forecast_Get" in message
 
 
 def _schema6_payload(*, hash_value: str = "fresh-hash") -> dict[str, object]:
