@@ -141,7 +141,6 @@ def test_complete_schema5_contract_survives_strict_normalization() -> None:
         "shouldImport",
         "shouldUseGrid",
         "recommendedAction",
-        "simulationAction",
         "executableAction",
         "commandId",
         "issuedAtUtc",
@@ -459,7 +458,7 @@ def test_three_coordinators_keep_schema5_diagnostics_entry_local() -> None:
 
 
 @pytest.mark.parametrize(
-    "plan_kind", ("live", "import_for_export_advisory", "sandbox_replay")
+    "plan_kind", ("live", "import_for_export_advisory")
 )
 def test_schema5_preserves_all_action_semantics(plan_kind: str) -> None:
     """Live, advisory, and replay expose exact backend action fields unchanged."""
@@ -477,7 +476,7 @@ def test_schema5_preserves_all_action_semantics(plan_kind: str) -> None:
     assert forecast is not None
     period = forecast.to_dict()["periods"][0]
     assert period["recommendedAction"] == "import_for_export"
-    assert period["simulationAction"] == "use_grid"
+    assert "simulationAction" not in period
     assert period["executableAction"] == "charge_required"
 
 
@@ -534,7 +533,6 @@ def test_import_for_export_decision_selected_and_disabled() -> None:
     (
         ("live", "executableAction"),
         ("import_for_export_advisory", "recommendedAction"),
-        ("sandbox_replay", "simulationAction"),
     ),
 )
 def test_import_for_export_uses_the_action_authoritative_for_each_plan_kind(
@@ -755,3 +753,277 @@ class _Coordinator:
 
     def async_add_listener(self, _listener, context=None):
         return lambda: None
+
+
+def _schema8_payload(source: dict[str, object] | None = None) -> dict[str, object]:
+    """Transform the historical fixture once into the current wire contract."""
+    payload = deepcopy(source) if source is not None else _schema6_payload(should_export=False)
+    payload["schemaVersion"] = 8
+    payload.setdefault("shouldExport", False)
+    for period in payload["periods"]:
+        period.setdefault("shouldExport", False)
+        period.pop("simulationAction", None)
+    payload["diagnostics"] = {"plannedEnergyLedger": payload.pop("plannedEnergyLedger")}
+    return payload
+
+
+def test_schema7_accepts_no_simulation_field() -> None:
+    payload = _schema6_payload(should_export=False)
+    payload["schemaVersion"] = 7
+    for period in payload["periods"]:
+        period.pop("simulationAction", None)
+    forecast = parse_schema5_forecast(payload)
+    assert forecast is not None and forecast.schema_version == 7
+    assert all("simulationAction" not in period for period in forecast.to_dict()["periods"])
+    assert not hasattr(forecast.periods[0], "simulation_action")
+
+
+@pytest.mark.parametrize("version", (5, 6))
+@pytest.mark.parametrize("value", ("absent", None, "export_for_profit", {"ignored": True}))
+@pytest.mark.parametrize("alias", ("simulationAction", "SimulationAction", "simulation_action"))
+def test_legacy5_and6_ignore_retired_simulation_field(version, value, alias) -> None:
+    payload = _schema6_payload(should_export=False)
+    payload["schemaVersion"] = version
+    for period in payload["periods"]:
+        period.pop("simulationAction", None)
+        if value != "absent":
+            period[alias] = value
+    snapshot = build_snapshot(payload)
+    command = parse_live_command(snapshot.direct_forecast, now_utc=datetime(2026, 7, 30, 12, tzinfo=timezone.utc), config=BatteryConfig(10_000, 2_000, 2_000, 2_000))
+    assert command.action == "charge_required"
+    assert "simulationAction" not in snapshot.schema5_forecast.to_dict()["periods"][0]
+
+
+@pytest.mark.parametrize("version", (5, 6, 7, 8))
+def test_replay_plan_is_rejected_without_control_mutation(version) -> None:
+    coordinator = object.__new__(HorizonIQCoordinator)
+    coordinator._last_valid_schema5_forecast = None
+    good = _schema8_payload()
+    accepted = coordinator._build_snapshot_or_stale(good)
+    coordinator._latest_snapshot = accepted
+    coordinator._publish_stale_forecast = MagicMock()
+    payload = _schema8_payload() if version == 8 else _schema6_payload(should_export=False)
+    payload["schemaVersion"] = version
+    payload["planKind"] = "sandbox_replay"
+    with pytest.raises(UpdateFailed, match="planKind is unsupported"):
+        coordinator._build_snapshot_or_stale(payload)
+    assert coordinator._last_valid_schema5_forecast is accepted.schema5_forecast
+    assert coordinator._latest_snapshot is accepted
+
+
+@pytest.mark.parametrize("style", ("camel", "pascal", "snake"))
+def test_schema8_normalizes_nested_diagnostics_for_each_wire_style(style) -> None:
+    payload = _schema8_payload()
+    expected = payload["diagnostics"]["plannedEnergyLedger"]
+    payload["diagnostics"]["ignored"] = {"harmless": [1, 2]}
+    if style != "camel":
+        payload = _wire_alias(payload, style)
+    forecast = parse_schema5_forecast(payload)
+    assert forecast is not None and forecast.schema_version == 8
+    assert forecast.planned_energy_ledger == expected
+    assert len(forecast.planned_energy_ledger) == 10
+    assert forecast.to_dict()["diagnostics"] == {"plannedEnergyLedger": expected}
+
+
+@pytest.mark.parametrize("diagnostics", ("missing", None))
+def test_schema8_missing_or_null_diagnostics_does_not_disable_live_command(diagnostics) -> None:
+    payload = _schema8_payload()
+    if diagnostics == "missing":
+        payload.pop("diagnostics")
+    else:
+        payload["diagnostics"] = None
+    snapshot = build_snapshot(payload)
+    assert snapshot.schema5_forecast.planned_energy_ledger is None
+    result = validate_live_forecast(snapshot.direct_forecast, now_utc=datetime(2026, 7, 30, 12, tzinfo=timezone.utc), config=BatteryConfig(10_000, 2_000, 2_000, 2_000))
+    assert result.command is not None and result.command.action == "charge_required"
+
+
+def _invalid_schema8_diagnostics():
+    import math
+    for value in (False, 1, "invalid", [], {}, {"plannedEnergyLedger": None}, {"plannedEnergyLedger": []}, {"plannedEnergyLedger": 1}, {"plannedEnergyLedger": {}}):
+        yield value
+    ledger = _schema8_payload()["diagnostics"]["plannedEnergyLedger"]
+    for field in ledger:
+        incomplete = deepcopy(ledger)
+        incomplete.pop(field)
+        yield {"plannedEnergyLedger": incomplete}
+        values = (None, 0, 1, "true", [], {}) if field == "healthy" else (None, True, False, float("nan"), float("inf"), -float("inf"), "0", 10**400)
+        for value in values:
+            invalid = deepcopy(ledger)
+            invalid[field] = value
+            yield {"plannedEnergyLedger": invalid}
+    for tolerance in (0, -0.001, 0.01, math.nextafter(0.001, 0), math.nextafter(0.001, math.inf)):
+        yield {"plannedEnergyLedger": {**ledger, "toleranceKwh": tolerance}}
+    for error in (0.001, -0.001, math.nextafter(0.001, math.inf), math.nextafter(-0.001, -math.inf)):
+        yield {"plannedEnergyLedger": {**ledger, "balanceErrorKwh": error, "healthy": abs(error) > 0.001}}
+
+
+@pytest.mark.parametrize("diagnostics", list(_invalid_schema8_diagnostics()))
+def test_schema8_rejects_invalid_diagnostics_atomically(diagnostics) -> None:
+    payload = _schema8_payload()
+    before = deepcopy(payload)
+    payload["diagnostics"] = diagnostics
+    coordinator = object.__new__(HorizonIQCoordinator)
+    accepted = build_snapshot(before).schema5_forecast
+    coordinator._last_valid_schema5_forecast = accepted
+    coordinator._publish_stale_forecast = MagicMock()
+    with pytest.raises(Schema5ForecastError, match=r"^Schema-8 diagnostics are invalid\.$"):
+        parse_schema5_forecast(payload)
+    with pytest.raises(UpdateFailed, match=r"Schema-8 diagnostics are invalid\.$"):
+        coordinator._build_snapshot_or_stale(payload)
+    assert coordinator._last_valid_schema5_forecast is accepted
+    coordinator._publish_stale_forecast.assert_called_once_with()
+
+
+@pytest.mark.parametrize("error", (0, 0.001, -0.001, 0.0010000000000000002, -0.0010000000000000002, -4.0))
+def test_schema8_accepts_inclusive_tolerance_and_finite_negative_error(error) -> None:
+    import math
+    payload = _schema8_payload()
+    ledger = payload["diagnostics"]["plannedEnergyLedger"]
+    ledger.update(balanceErrorKwh=error, healthy=abs(error) <= 0.001)
+    forecast = parse_schema5_forecast(payload)
+    assert forecast.planned_energy_ledger == ledger
+    if abs(error) > 0.001 and abs(error) < 0.002:
+        assert abs(error) == math.nextafter(0.001, math.inf)
+    # Finite signed fields retain their backend meaning without extra sign rules.
+    ledger["gridImportKwh"] = -1.0
+    assert parse_schema5_forecast(payload).planned_energy_ledger["gridImportKwh"] == -1.0
+
+
+@pytest.mark.parametrize("alias", ("plannedEnergyLedger", "PlannedEnergyLedger", "planned_energy_ledger"))
+@pytest.mark.parametrize("value", (None, {}, "invalid"))
+def test_schema8_rejects_root_ledger_and_conflicting_nested_aliases(alias, value) -> None:
+    payload = _schema8_payload()
+    payload[alias] = value
+    with pytest.raises(Schema5ForecastError):
+        parse_schema5_forecast(payload)
+    for mutate in (
+        lambda p: p.update(Diagnostics=None),
+        lambda p: p["diagnostics"].update(PlannedEnergyLedger=None),
+        lambda p: p["diagnostics"]["plannedEnergyLedger"].update(BalanceErrorKwh=42),
+    ):
+        payload = _schema8_payload()
+        mutate(payload)
+        with pytest.raises(Schema5ForecastError, match="Conflicting aliases"):
+            parse_schema5_forecast(payload)
+    payload = _schema8_payload()
+    payload["schemaVersion"] = 9
+    with pytest.raises(Schema5ForecastError, match="Unsupported forecast schemaVersion"):
+        parse_schema5_forecast(payload)
+
+
+@pytest.mark.parametrize("key", ("apiKey", "Authorization", "registration_data", "function-key", "headers", "credentials", "token"))
+@pytest.mark.parametrize("location", ("wrapper", "ledger", "unknown-list"))
+def test_schema8_diagnostics_reject_nested_transport_secrets(key, location) -> None:
+    payload = _schema8_payload()
+    target = payload["diagnostics"] if location == "wrapper" else payload["diagnostics"]["plannedEnergyLedger"]
+    target["unknown"] = [{"nested": [{key: "never-log-this-value"}]}] if location == "unknown-list" else {key: "never-log-this-value"}
+    with pytest.raises(Schema5ForecastError, match="diagnostics contain a prohibited key") as error:
+        parse_schema5_forecast(payload)
+    assert "never-log-this-value" not in str(error.value)
+
+
+@pytest.mark.parametrize("version", (5, 6, 7, 8))
+@pytest.mark.parametrize("available", (True, False))
+def test_schema8_to_dict_emits_only_nested_diagnostics(version, available) -> None:
+    payload = _schema8_payload() if version == 8 else _schema6_payload(should_export=False)
+    payload["schemaVersion"] = version
+    if version == 8 and not available:
+        payload["diagnostics"] = None
+    forecast = parse_schema5_forecast(payload)
+    serialized = forecast.to_dict()
+    if version == 8:
+        assert "plannedEnergyLedger" not in serialized
+        assert serialized["diagnostics"] == payload["diagnostics"]
+    else:
+        assert "diagnostics" not in serialized
+        assert serialized["plannedEnergyLedger"] == payload["plannedEnergyLedger"]
+        missing = deepcopy(payload)
+        missing.pop("plannedEnergyLedger")
+        with pytest.raises(Schema5ForecastError):
+            parse_schema5_forecast(missing)
+    assert parse_schema5_forecast(serialized) == forecast
+
+
+async def test_schema8_same_hash_refreshes_entry_local_diagnostics(hass, mock_config_entry, entry_data, aioclient_mock) -> None:
+    """Real Forecast_Get refresh replaces diagnostics even when its hash is stable."""
+    import re
+    from unittest.mock import patch
+    from yarl import URL
+    from custom_components.horizoniq.const import CONF_HASH, SANDBOX_ENVIRONMENT
+
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "4320")
+    coordinator = HorizonIQCoordinator(hass, mock_config_entry, entry_data["url"], entry_data["api_key"], entry_data["battery_capacity_sensor"], SANDBOX_ENVIRONMENT)
+    first_payload = {**_schema8_payload(), "hash": "same-hash"}
+    aioclient_mock.get(re.compile(rf"\A{re.escape(str(URL(coordinator._build_request_url('4320'))))}\Z"), json=first_payload)
+    first = await coordinator.async_fetch_sandbox_forecast()
+    assert first.forecast_freshness is ForecastFreshness.FRESH
+    assert mock_config_entry.data[CONF_HASH] == "same-hash"
+    accepted_config = dict(mock_config_entry.data)
+    second_payload = deepcopy(first_payload)
+    second_payload["diagnostics"]["plannedEnergyLedger"]["gridImportKwh"] = 123.5
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(re.compile(rf"\A{re.escape(str(URL(coordinator._build_request_url('4320'))))}\Z"), json=second_payload)
+    with patch.object(hass.config_entries, "async_update_entry", wraps=hass.config_entries.async_update_entry) as update_entry:
+        second = await coordinator.async_fetch_sandbox_forecast()
+    update_entry.assert_not_called()
+    assert aioclient_mock.call_count == 1
+    assert second.publication_sequence > first.publication_sequence
+    assert coordinator.last_forecast is second.schema5_forecast
+    assert second.schema5_forecast.planned_energy_ledger["gridImportKwh"] == 123.5
+    assert first.schema5_forecast.planned_energy_ledger["gridImportKwh"] != 123.5
+    assert mock_config_entry.data == accepted_config
+    assert "diagnostics" not in json.dumps(accepted_config)
+
+
+async def test_schema8_refresh_keeps_diagnostics_entry_local_and_unrecorded(hass, mock_config_entry, entry_data, aioclient_mock, caplog) -> None:
+    """HTTP refresh, stale-last-good and Recorder serialization stay entry scoped."""
+    import re
+    from yarl import URL
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+    from homeassistant.components.recorder.db_schema import StateAttributes
+    from custom_components.horizoniq.const import DOMAIN, SANDBOX_ENVIRONMENT
+
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "4320")
+    other_entry = MockConfigEntry(domain=DOMAIN, title="Other", data=entry_data, entry_id="schema8-other")
+    other_entry.add_to_hass(hass)
+    coordinators = [HorizonIQCoordinator(hass, entry, entry_data["url"], entry_data["api_key"], entry_data["battery_capacity_sensor"], SANDBOX_ENVIRONMENT) for entry in (mock_config_entry, other_entry)]
+    snapshots = []
+    for index, coordinator in enumerate(coordinators):
+        payload = _schema8_payload()
+        payload["planId"] = f"entry-{index}"
+        payload["diagnostics"]["plannedEnergyLedger"]["gridImportKwh"] = index + 10.0
+        payload["registrationData"] = "private-registration-sentinel"
+        payload["headers"] = {"Authorization": "transport-sentinel"}
+        aioclient_mock.clear_requests()
+        aioclient_mock.get(re.compile(rf"\A{re.escape(str(URL(coordinator._build_request_url('4320'))))}\Z"), json=payload)
+        snapshots.append(await coordinator.async_fetch_sandbox_forecast())
+    assert coordinators[0].last_forecast is not coordinators[1].last_forecast
+    other_before = coordinators[1].last_forecast.to_dict()
+    invalid = _schema8_payload()
+    invalid["diagnostics"]["plannedEnergyLedger"]["healthy"] = "unsafe-value"
+    aioclient_mock.clear_requests()
+    first = coordinators[0]
+    aioclient_mock.get(re.compile(rf"\A{re.escape(str(URL(first._build_request_url('4320'))))}\Z"), json=invalid)
+    with pytest.raises(UpdateFailed, match="Schema-8 diagnostics are invalid"):
+        await first.async_fetch_sandbox_forecast()
+    assert first.data.forecast_freshness is ForecastFreshness.STALE
+    assert first.data.direct_forecast is None
+    assert first.data.schema5_forecast.planned_energy_ledger == snapshots[0].schema5_forecast.planned_energy_ledger
+    assert coordinators[1].last_forecast.to_dict() == other_before
+    assert not coordinators[1].last_forecast.stale
+    entity = ForecastDetailSensor(first, "schema8-entry", "Sandbox")
+    attributes = entity.extra_state_attributes
+    assert attributes["forecast"]["diagnostics"] is not None
+    state = State("sensor.schema8_diagnostics", "2", attributes, state_info={"unrecorded_attributes": entity._unrecorded_attributes})
+    event = Event(EVENT_STATE_CHANGED, {"entity_id": state.entity_id, "old_state": None, "new_state": state})
+    serialized = StateAttributes.shared_attrs_bytes_from_event(event, dialect=None)
+    assert b'"forecast"' not in serialized
+    assert b"diagnostics" not in serialized
+    assert b"plannedEnergyLedger" not in serialized
+    assert len(serialized) < 8_192
+    for sentinel in ("private-registration-sentinel", "transport-sentinel", "unsafe-value"):
+        assert sentinel not in repr(attributes)
+        assert sentinel not in caplog.text
+    assert "diagnostics" not in json.dumps(dict(mock_config_entry.data))
+    assert "diagnostics" not in json.dumps(dict(other_entry.data))

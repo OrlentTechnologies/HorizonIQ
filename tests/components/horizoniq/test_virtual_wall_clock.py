@@ -29,7 +29,6 @@ from custom_components.horizoniq.button import SandboxStepButton
 from custom_components.horizoniq.sandbox_runtime import HorizonIQEntryRuntime
 from custom_components.horizoniq.select import (
     SandboxClockRateSelect,
-    SandboxProfileSelect,
 )
 from custom_components.horizoniq.simulation.clock import ClockRate, VirtualClock
 from custom_components.horizoniq.simulation.models import (
@@ -37,7 +36,6 @@ from custom_components.horizoniq.simulation.models import (
     CommandStatus,
     OperatingMode,
 )
-from custom_components.horizoniq.switch import SandboxProfilePlaybackSwitch
 
 
 UTC = timezone.utc
@@ -169,7 +167,7 @@ async def test_virtual_repeated_overhead_tracks_wall_time_without_clock_drift() 
     )
 
 
-async def test_virtual_wall_clock_accepts_current_action_despite_stale_replay_clock() -> None:
+async def test_virtual_wall_clock_ignores_stale_manual_clock() -> None:
     """A persisted Replay timestamp cannot make a current live action premature."""
     forecast = _forecast()
     runtime, _, _ = _runtime(forecast)
@@ -466,10 +464,10 @@ async def test_mode_transitions_preserve_energy_and_clear_only_mode_owned_state(
     runtime._virtual_monotonic_baseline = 10
     runtime._virtual_next_refresh_monotonic = 20
 
-    await runtime.async_select_operating_mode("replay")
+    await runtime.async_select_operating_mode("manual")
 
     assert runtime.simulator_enabled is False
-    assert runtime.operating_mode == "replay"
+    assert runtime.operating_mode == "manual"
     assert runtime.energy_wh == 6_000
     assert runtime.load_w == 410
     assert runtime.external_power_w is None
@@ -486,30 +484,31 @@ async def test_mode_transition_reloads_only_the_owning_entry() -> None:
     runtime, _, hass = _runtime()
     reload_entry = AsyncMock()
     hass.config_entries = SimpleNamespace(async_reload=reload_entry)
+    runtime._entry_hass = hass
 
-    await runtime.async_select_operating_mode("replay")
+    await runtime.async_select_operating_mode("manual")
 
     reload_entry.assert_awaited_once_with(runtime.entry_id)
     assert runtime.simulator_enabled is False
+    assert runtime._hass is None
+    await runtime.async_select_operating_mode("virtual")
+    assert reload_entry.await_count == 2
+    assert all(call.args == (runtime.entry_id,) for call in reload_entry.await_args_list)
+    await runtime.async_select_operating_mode("virtual")
+    assert reload_entry.await_count == 2
 
 
-def test_virtual_hides_replay_only_entities() -> None:
+def test_virtual_hides_manual_only_entities() -> None:
     """Wall-clock Virtual mode exposes no controls that mutate Replay time."""
     runtime, _, _ = _runtime()
-    profile = SandboxProfileSelect(runtime, runtime.entry_id)
     rate = SandboxClockRateSelect(runtime, runtime.entry_id)
     step = SandboxStepButton(runtime, runtime.entry_id)
-    playback = SandboxProfilePlaybackSwitch(runtime, runtime.entry_id)
 
-    assert profile.available is False
     assert rate.available is False
     assert step.available is False
-    assert playback.available is False
 
-    profile._remove_listener()
     rate._remove_listener()
     step._remove_listener()
-    playback._remove_listener()
 
 
 def test_simulator_status_uses_the_active_mode_time_source() -> None:
@@ -518,7 +517,7 @@ def test_simulator_status_uses_the_active_mode_time_source() -> None:
 
     virtual = runtime._build_simulator_status().to_payload()
     replay_now = NOW - timedelta(hours=2)
-    runtime._operating_mode = "replay"
+    runtime._operating_mode = "manual"
     runtime._clock = VirtualClock(replay_now, ClockRate.PAUSED)
     replay = runtime._build_simulator_status().to_payload()
 
@@ -539,7 +538,7 @@ async def test_mixed_mode_entries_keep_time_and_energy_isolated() -> None:
     virtual_hass.loop.now = 10
 
     replay.simulator_enabled = False
-    await replay.async_select_operating_mode("replay")
+    await replay.async_select_operating_mode("manual")
     replay.simulator_enabled = True
     replay.set_inputs(load_w=1_000, solar_w=0)
 

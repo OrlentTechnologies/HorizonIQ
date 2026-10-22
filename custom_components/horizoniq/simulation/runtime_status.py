@@ -78,18 +78,6 @@ class MqttStatusState(StrEnum):
     FAULTED = "faulted"
 
 
-class ReplayStatusState(StrEnum):
-    """Frozen replay-session summary vocabulary."""
-
-    NONE = "none"
-    PENDING = "pending"
-    READY = "ready"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    REJECTED = "rejected"
-
-
 class CommandStatusState(StrEnum):
     """Frozen command-session summary vocabulary."""
 
@@ -125,7 +113,6 @@ class FaultStatusKind(StrEnum):
     DELAY_MQTT = "delay_mqtt"
     MALFORMED_TELEMETRY = "malformed_telemetry"
     MQTT_DISCONNECT = "mqtt_disconnect"
-    REPLAY_API_FAILURE = "replay_api_failure"
     REJECT_COMMAND = "reject_command"
     RUNTIME_RESTART = "runtime_restart"
 
@@ -158,7 +145,7 @@ class SimulatorStatus:
     energy_balance_healthy: bool | None
     energy_balance_error_wh: float | None
     mqtt_state: MqttStatusState | None
-    replay_state: ReplayStatusState | None
+    replay_state: None
     command_state: CommandStatusState | None
 
     def to_payload(self) -> dict[str, object]:
@@ -284,6 +271,8 @@ def _parse_simulator_status(value: Mapping[str, object]) -> SimulatorStatus:
     healthy = value["energyBalanceHealthy"]
     if healthy is not None and not isinstance(healthy, bool):
         raise ValueError("Simulator energy balance health is invalid")
+    if value["replayState"] is not None:
+        raise ValueError("Simulator reserved status is invalid")
     return SimulatorStatus(
         gx_device_id=_gx_id(value["gxDeviceId"]),
         timestamp_utc=_parse_utc_z(value["timestampUtc"]),
@@ -310,7 +299,7 @@ def _parse_simulator_status(value: Mapping[str, object]) -> SimulatorStatus:
             "Energy balance error",
         ),
         mqtt_state=_nullable_enum(value["mqttState"], MqttStatusState, "MQTT state"),
-        replay_state=_nullable_enum(value["replayState"], ReplayStatusState, "Replay state"),
+        replay_state=None,
         command_state=_nullable_enum(value["commandState"], CommandStatusState, "Command state"),
     )
 

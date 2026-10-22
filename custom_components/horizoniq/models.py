@@ -69,7 +69,6 @@ class DirectForecastPeriod:
 
     starts_at_utc: datetime
     executable_action: str
-    simulation_action: str | None
     recommended_action: str | None
     command_id: str | None
     issued_at_utc: datetime | None
@@ -119,7 +118,6 @@ class ForecastPeriod(TypedDict, total=False):
     bms_hold_period: bool
     battery_management_system_state: str
     executable_action: str
-    simulation_action: str
     recommended_action: str
     command_id: str
     issued_at_utc: str

@@ -129,7 +129,7 @@ def _sandbox_entities(
         SandboxRuntimeSensor(runtime, entry_id, "faults", "Active faults", diagnostic=True),
         ImportForExportDecisionSensor(runtime, entry_id),
     ]
-    if runtime.operating_mode == "replay":
+    if runtime.operating_mode == "manual":
         entities.extend(
             [
                 SandboxRuntimeSensor(runtime, entry_id, "clock", "Virtual time"),
@@ -258,7 +258,10 @@ class SandboxRuntimeSensor(SensorEntity):
             "command_reason": _friendly_state(self._runtime.last_command_reason),
             "storage_diagnostic": self._runtime.storage_diagnostic,
             "timing_diagnostic": self._runtime.timing_diagnostic,
-            "profile": self._runtime.selected_profile_filename or "Not selected",
+            "profile": (
+                self._runtime.profile_cursor.profile_id
+                if self._runtime.profile_cursor is not None else "Not selected"
+            ),
             "profile_cursor": (
                 self._runtime.profile_cursor.index
                 if self._runtime.profile_cursor is not None

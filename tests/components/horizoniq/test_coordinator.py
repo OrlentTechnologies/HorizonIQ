@@ -1485,3 +1485,61 @@ async def test_exact_subscription_failure_stops_polling_and_clears_cache(
     )
     assert mock_config_entry.data[CONF_HASH] == ""
     assert mock_config_entry.data[CONF_REGISTRATION_DATA] == ""
+
+
+async def test_live_virtual_battery_uses_normal_forecast_get_only(hass, mock_config_entry, entry_data, aioclient_mock) -> None:
+    """A real virtual runtime uses only its normal authenticated coordinator path."""
+    from datetime import datetime, timezone
+    from .test_sandbox_runtime import _entry_data, REGISTRATION_ID
+    from custom_components.horizoniq.sandbox_runtime import HorizonIQEntryRuntime
+
+    coordinator = HorizonIQCoordinator(hass, mock_config_entry, entry_data["url"], entry_data["api_key"], entry_data["battery_capacity_sensor"], SANDBOX_ENVIRONMENT)
+    runtime = HorizonIQEntryRuntime(coordinator, REGISTRATION_ID, mock_config_entry.entry_id)
+    runtime.configure_sandbox(_entry_data())
+    runtime._live_forecast_now = lambda: datetime(2026, 7, 30, 12, tzinfo=timezone.utc)
+    aioclient_mock.get(re.compile(r"https://example.com/api/Forecast_Get\?.*"), json=_flat_registration_forecast(6))
+    with patch("custom_components.horizoniq.sandbox_runtime.mqtt.async_subscribe", AsyncMock(side_effect=RuntimeError("optional broker unavailable"))):
+        await runtime.async_enable(hass)
+        assert aioclient_mock.call_count == 1
+        assert runtime.selected_direct_action == "charge_required"
+        assert runtime.time_source == "wall_clock"
+        assert coordinator.last_forecast.plan_kind == "live"
+        assert coordinator.last_direct_forecast is not None
+        assert urlparse(str(aioclient_mock.mock_calls[0][1])).path == "/api/Forecast_Get"
+        await runtime.async_unload()
+
+
+async def test_removed_replay_endpoint_is_never_called(hass, mock_config_entry, entry_data, aioclient_mock) -> None:
+    """The sole HTTP request remains Forecast_Get and no replay API is exposed."""
+    coordinator = HorizonIQCoordinator(hass, mock_config_entry, entry_data["url"], entry_data["api_key"], entry_data["battery_capacity_sensor"], SANDBOX_ENVIRONMENT)
+    hass.states.async_set(entry_data["battery_capacity_sensor"], "4320")
+    aioclient_mock.get(re.compile(r"https://example.com/api/Forecast_Get\?.*"), json=_flat_registration_forecast(6))
+    result = await coordinator.async_fetch_sandbox_forecast()
+    assert result.forecast_freshness is ForecastFreshness.FRESH
+    assert not hasattr(coordinator, "async_fetch_sandbox_replay")
+    assert aioclient_mock.call_count == 1
+    assert all(urlparse(str(call[1])).path == "/api/Forecast_Get" for call in aioclient_mock.mock_calls)
+
+
+@pytest.mark.parametrize("version,mode", ((13, "replay"), (14, "manual"), (14, "virtual"), (14, None)))
+async def test_restored_paused_modes_suppress_setup_forecast_get(hass, mock_config_entry, entry_data, aioclient_mock, version, mode) -> None:
+    """The actual coordinator setup refresh cannot escape a paused restore."""
+    from .test_sandbox_runtime import _entry_data, REGISTRATION_ID
+    from custom_components.horizoniq.sandbox_runtime import HorizonIQEntryRuntime
+    from custom_components.horizoniq.sandbox_storage import SandboxStorage
+
+    coordinator = HorizonIQCoordinator(hass, mock_config_entry, entry_data["url"], entry_data["api_key"], entry_data["battery_capacity_sensor"], SANDBOX_ENVIRONMENT)
+    source = HorizonIQEntryRuntime(coordinator, REGISTRATION_ID, mock_config_entry.entry_id)
+    source.configure_sandbox(_entry_data())
+    record = source._storage_record()
+    record.update(storage_schema_version=version, operating_mode=mode, simulator_enabled=False)
+    await SandboxStorage(hass, mock_config_entry.entry_id).async_save(record)
+    restored = HorizonIQEntryRuntime(coordinator, REGISTRATION_ID, mock_config_entry.entry_id)
+    restored.configure_sandbox(_entry_data())
+    await restored.async_restore_storage(hass)
+    assert not restored.simulator_enabled
+    assert coordinator._sandbox_paused
+    await coordinator.async_refresh()
+    assert aioclient_mock.call_count == 0
+    assert coordinator.last_direct_forecast is None
+    await restored.async_unload()

@@ -228,14 +228,14 @@ def test_export_reads_backend_boolean_and_has_bounded_attributes() -> None:
     }
 
     replay_runtime = SimpleNamespace(
-        operating_mode="replay",
+        operating_mode="manual",
         virtual_time_utc=CURRENT_PERIOD,
         add_listener=lambda listener: lambda: None,
     )
     replay = _export_entity(
         _schema5_forecast(
             schema_version=6,
-            plan_kind="sandbox_replay",
+            plan_kind="live",
             should_import=False,
             should_export=True,
             recommended_action="none",

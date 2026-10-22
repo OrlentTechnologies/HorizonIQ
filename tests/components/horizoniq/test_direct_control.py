@@ -12,7 +12,6 @@ import pytest
 from custom_components.horizoniq.direct_control import (
     DirectForecastRejection,
     parse_live_command,
-    parse_replay_command,
     validate_live_forecast,
     validate_virtual_recommendation,
 )
@@ -195,7 +194,7 @@ def test_live_charge_import_and_hold_ignore_retired_permissions(
     assert rejected.rejection is DirectForecastRejection.COMMAND_METADATA_INVALID
 
 
-def test_replay_and_virtual_export_need_no_profile_permission() -> None:
+def test_virtual_export_needs_no_profile_permission() -> None:
     """Local export paths use existing authority and physical power limits."""
     virtual = _coordinator_forecast(
         _recommended_payload("export_for_profit", expected_export=1.0)
@@ -206,22 +205,6 @@ def test_replay_and_virtual_export_need_no_profile_permission() -> None:
     )
     assert virtual_result.command is not None
     assert virtual_result.command.command.requested_grid_power_w == -2_000
-
-    replay = _payload(action="none", plan_kind="sandbox_replay")
-    period = replay["periods"][0]
-    assert isinstance(period, dict)
-    period.update(
-        simulationAction="export_for_solar_headroom",
-        executableAction="none",
-        commandId=None,
-        issuedAtUtc=None,
-        expiresAtUtc=None,
-        actionPriority=None,
-        expectedExport=1.0,
-    )
-    replay_command = parse_replay_command(replay, virtual_now_utc=NOW, config=CONFIG)
-    assert replay_command.command.requested_grid_power_w == -2_000
-    assert replay_command.command_id is None
 
     live_export = _coordinator_forecast(_payload(action="export_for_profit"))
     assert live_export is not None
@@ -655,7 +638,7 @@ async def test_paused_runtime_stages_forecasts_and_reset_reports_awaiting() -> N
     assert runtime.last_command_status is CommandStatus.NO_ACTION
     assert runtime.decision_summary == "No executable action; self-consumption applied."
 
-    with pytest.raises(ValueError, match="Replay mode"):
+    with pytest.raises(ValueError, match="Manual mode"):
         runtime.set_clock_rate(ClockRate.X1)
     runtime.reset()
     assert runtime.forecast_health == "awaiting_forecast"
@@ -693,22 +676,65 @@ def test_missing_or_wrong_schema5_fields_are_rejected() -> None:
         parse_live_command(_coordinator_forecast(payload), now_utc=NOW, config=CONFIG)
 
 
-def test_replay_export_uses_half_hour_power_and_no_command_identity() -> None:
-    payload = _payload(action="none", plan_kind="sandbox_replay")
+
+
+@pytest.mark.parametrize("version", (6, 7))
+@pytest.mark.parametrize("action,priority", (("charge_required", 1), ("import_for_export", 2), ("use_grid", 3)))
+def test_live_command_uses_current_priority_for6_and7(version, action, priority) -> None:
+    payload = _payload(action=action)
+    payload["schemaVersion"] = version
+    payload["shouldExport"] = False
     period = payload["periods"][0]
-    assert isinstance(period, dict)
-    period.update(
-        {
-            "simulationAction": "export_for_profit",
-            "executableAction": "none",
-            "commandId": None,
-            "issuedAtUtc": None,
-            "expiresAtUtc": None,
-            "actionPriority": None,
-            "expectedExport": 1.0,
-        }
-    )
-    payload["equipmentProfile"] = _profile()
-    command = parse_replay_command(payload, virtual_now_utc=NOW, config=CONFIG)
-    assert command.command.requested_grid_power_w == -2_000
-    assert command.command_id is None
+    period.update(shouldExport=False, actionPriority=priority, expectedImport=1.0)
+    period.pop("simulationAction", None)
+    direct = parse_live_command(_coordinator_forecast(payload), now_utc=NOW, config=CONFIG)
+    assert direct.action == action
+    assert direct.command.requested_grid_power_w == (None if action == "use_grid" else 2_000)
+    period["actionPriority"] = priority + 1
+    assert validate_live_forecast(_coordinator_forecast(payload), now_utc=NOW, config=CONFIG).rejection is DirectForecastRejection.COMMAND_METADATA_INVALID
+
+
+@pytest.mark.parametrize("diagnostics", ("present", "missing", None))
+@pytest.mark.parametrize("action,priority", (("charge_required", 1), ("import_for_export", 2), ("use_grid", 3)))
+def test_schema8_live_commands_keep_current_priorities_and_guards(diagnostics, action, priority) -> None:
+    from copy import deepcopy
+    from .test_forecast_schema5 import _schema8_payload
+    from custom_components.horizoniq.forecast_schema5 import Schema5ForecastError
+
+    payload = _schema8_payload(_payload(action=action))
+    period = payload["periods"][0]
+    period.update(actionPriority=priority, expectedImport=2.0)
+    if diagnostics == "missing":
+        payload.pop("diagnostics")
+    elif diagnostics is None:
+        payload["diagnostics"] = None
+    forecast = _coordinator_forecast(payload)
+    command = parse_live_command(forecast, now_utc=NOW, config=CONFIG)
+    assert command.action == action
+    assert command.command_id == period["commandId"]
+    assert command.plan_id == payload["planId"]
+    assert command.command.expires_at_utc == NOW + timedelta(minutes=30)
+    assert command.command.requested_grid_power_w == (None if action == "use_grid" else 2_000)
+    for field, invalid in (("commandId", "invalid"), ("issuedAtUtc", "2026-07-30T12:01:00Z"), ("expiresAtUtc", "2026-07-30T12:29:00Z"), ("actionPriority", priority + 1), ("executableAction", "export_for_profit")):
+        malformed = deepcopy(payload)
+        malformed["periods"][0][field] = invalid
+        assert validate_live_forecast(_coordinator_forecast(malformed), now_utc=NOW, config=CONFIG).command is None
+    assert validate_live_forecast(forecast, now_utc=NOW + timedelta(minutes=30), config=CONFIG).command is None
+    assert validate_live_forecast(forecast, now_utc=NOW - timedelta(microseconds=1), config=CONFIG).command is None
+    malformed = deepcopy(payload)
+    malformed["periods"][0].pop("executableAction")
+    with pytest.raises(Schema5ForecastError):
+        _coordinator_forecast(malformed)
+    advisory = deepcopy(payload)
+    advisory["planKind"] = "import_for_export_advisory"
+    assert validate_live_forecast(_coordinator_forecast(advisory), now_utc=NOW, config=CONFIG).rejection is DirectForecastRejection.PLAN_KIND_INVALID
+    # Virtual export retains its existing local authority and physical limits.
+    exporting = _schema8_payload(_recommended_payload("export_for_profit", expected_export=2.0))
+    if diagnostics == "missing":
+        exporting.pop("diagnostics")
+    elif diagnostics is None:
+        exporting["diagnostics"] = None
+    result = validate_virtual_recommendation(_coordinator_forecast(exporting), now_utc=NOW, config=CONFIG)
+    assert result.command.command.requested_grid_power_w == -2_000
+    exporting["periods"][0]["recommendedAction"] = "export_for_solar_headroom"
+    assert validate_virtual_recommendation(_coordinator_forecast(exporting), now_utc=NOW, config=CONFIG).command is None

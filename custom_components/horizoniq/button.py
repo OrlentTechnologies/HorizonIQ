@@ -44,11 +44,10 @@ async def async_setup_entry(
                 SandboxClearFaultsButton(runtime, config_entry.entry_id),
             ]
         )
-        if runtime.operating_mode == "replay":
+        if runtime.operating_mode == "manual":
             entities.extend(
                 [
                     SandboxStepButton(runtime, config_entry.entry_id),
-                    SandboxResetProfileButton(runtime, config_entry.entry_id),
                 ]
             )
     async_add_entities(entities)
@@ -118,7 +117,7 @@ class SandboxStepButton(_SandboxButton):
 
     @property
     def available(self) -> bool:
-        return super().available and self._runtime.operating_mode == "replay"
+        return super().available and self._runtime.operating_mode == "manual"
 
     async def async_press(self) -> None:
         """Apply the next virtual half hour."""
@@ -136,22 +135,6 @@ class SandboxResetButton(_SandboxButton):
     async def async_press(self) -> None:
         """Reset only this virtual battery state and clock."""
         await self._runtime.async_reset()
-
-
-class SandboxResetProfileButton(_SandboxButton):
-    """Reset the selected replay profile cursor."""
-
-    _attr_name = "Reset profile"
-
-    def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str) -> None:
-        super().__init__(runtime, entry_id, "profile_reset")
-
-    @property
-    def available(self) -> bool:
-        return super().available and self._runtime.operating_mode == "replay"
-
-    async def async_press(self) -> None:
-        await self._runtime.async_reset_playback()
 
 
 class SandboxSaveSnapshotButton(_SandboxButton):

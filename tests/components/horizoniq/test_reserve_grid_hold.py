@@ -12,7 +12,7 @@ import pytest
 from custom_components.horizoniq.coordinator_helpers import build_snapshot
 from custom_components.horizoniq.forecast_schema5 import Schema5ForecastError
 from custom_components.horizoniq.direct_control import (
-    parse_live_command, parse_replay_command, validate_virtual_recommendation,
+    parse_live_command, validate_virtual_recommendation,
 )
 from custom_components.horizoniq.sandbox_runtime import HorizonIQEntryRuntime
 from custom_components.horizoniq.simulation.models import (
@@ -31,7 +31,7 @@ def _payload(action="use_grid", *, schema=6, authority="live", capability=True):
     payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
     payload["schemaVersion"] = schema
     payload["planId"] = str(uuid4())
-    payload["planKind"] = "sandbox_replay" if authority == "replay" else "live"
+    payload["planKind"] = "live"
     payload["createdAtUtc"] = (NOW - timedelta(seconds=2)).isoformat().replace("+00:00", "Z")
     payload["effectiveAtUtc"] = NOW.isoformat().replace("+00:00", "Z")
     payload["shouldImport"] = action in {"charge_required", "import_for_export"}
@@ -39,7 +39,7 @@ def _payload(action="use_grid", *, schema=6, authority="live", capability=True):
     payload["equipmentProfile"]["supportedControl"]["useGrid"] = capability
     payload["equipmentProfile"]["batteryCapacityWh"] = 10_000
     payload["equipmentProfile"]["minimumCapacityPercentage"] = 0.2
-    if schema == 6:
+    if schema in {6, 7, 8}:
         payload["shouldExport"] = action == "export_for_profit"
     period = deepcopy(payload["periods"][0])
     payload["periods"] = [period]
@@ -47,15 +47,14 @@ def _payload(action="use_grid", *, schema=6, authority="live", capability=True):
     period["shouldImport"] = payload["shouldImport"]
     period["shouldUseGrid"] = payload["shouldUseGrid"]
     period["estimatedGeneration"] = 0
-    if schema == 6:
+    if schema in {6, 7, 8}:
         period["shouldExport"] = action == "export_for_profit"
     period["recommendedAction"] = action
-    period["simulationAction"] = action if authority == "replay" else "none"
     period["executableAction"] = action if authority == "live" else "none"
     period["decisionTrace"]["selectedAction"] = action
     period["actionPriority"] = {
-        "charge_required": 1, "import_for_export": 2 if schema == 6 else 5,
-        "use_grid": 3 if schema == 6 else 4,
+        "charge_required": 1, "import_for_export": 2 if schema in {6, 7, 8} else 5,
+        "use_grid": 3 if schema in {6, 7, 8} else 4,
     }.get(action)
     if authority != "live":
         for key in ("commandId", "issuedAtUtc", "expiresAtUtc", "actionPriority"):
@@ -146,9 +145,6 @@ def test_all_direct_use_grid_paths_select_grid_preservation():
     assert generic.command is not None
     assert generic.command.command.mode is OperatingMode.GRID_PRESERVATION
     assert generic.command.command.requested_grid_power_w is None
-    replay = parse_replay_command(_payload(authority="replay", capability=False), virtual_now_utc=NOW, config=CONFIG)
-    assert replay.command.mode is OperatingMode.GRID_PRESERVATION
-    assert replay.command.requested_grid_power_w is None
 
 
 @pytest.mark.parametrize("schema,action,priority", [
@@ -165,7 +161,7 @@ def test_live_priorities_match_each_supported_schema(schema, action, priority):
         with pytest.raises(ValueError):
             parse_live_command(_forecast(bad), now_utc=NOW, config=CONFIG)
     bad = deepcopy(payload)
-    bad["schemaVersion"] = 7
+    bad["schemaVersion"] = 9
     with pytest.raises(Schema5ForecastError, match="Unsupported forecast schemaVersion"):
         build_snapshot(bad)
 
@@ -217,7 +213,7 @@ def test_hold_window_and_invalid_setpoint_use_existing_fallbacks():
 
 def test_hold_snapshot_round_trip_and_invalid_restore_are_atomic():
     snapshot = SimulationSnapshot(
-        4, BatteryState(2500), IntervalLedger(), ClockState(NOW, "paused", 0, 0),
+        5, BatteryState(2500), IntervalLedger(), ClockState(NOW, "paused", 0, 0),
         None, None, Command(OperatingMode.GRID_PRESERVATION, None, NOW, NOW + timedelta(minutes=30)),
         CommandStatus.APPLIED, 600, 0,
     )
@@ -233,11 +229,12 @@ def test_hold_snapshot_round_trip_and_invalid_restore_are_atomic():
         older["schema_version"] = schema
         older["active_command"]["mode"] = "grid_setpoint"
         older["active_command"]["requested_grid_power_w"] = 0
-        assert from_json(json.dumps(older)).active_command.mode is OperatingMode.GRID_SETPOINT
+        assert from_json(json.dumps(older)).active_command is None
+        assert from_json(json.dumps(older)).command_status is CommandStatus.FALLBACK_MISSING
     invalid = json.loads(encoded)
     invalid["active_command"]["requested_grid_power_w"] = 0
     before = (runtime._state, runtime._cumulative_ledger)
-    with pytest.raises(ValueError, match="Stored command is invalid"):
+    with pytest.raises(ValueError, match="snapshot is invalid"):
         runtime._validated_snapshot(from_json(json.dumps(invalid)))
     assert (runtime._state, runtime._cumulative_ledger) == before
     invalid["active_command"]["mode"] = "unknown"
@@ -299,13 +296,13 @@ def test_partial_period_command_uses_remaining_time_and_full_slot_solar_power():
 
 
 @pytest.mark.asyncio
-async def test_replay_snapshot_restore_retains_valid_hold_and_rejects_invalid_atomically():
+async def test_manual_snapshot_restore_retains_valid_hold_and_rejects_invalid_atomically():
     from custom_components.horizoniq.simulation.clock import VirtualClock
     runtime = HorizonIQEntryRuntime(coordinator=None, registration_id="registration")
     runtime._config = CONFIG
     runtime._state = BatteryState(2500)
     runtime._clock = VirtualClock(NOW)
-    runtime._operating_mode = "replay"
+    runtime._operating_mode = "manual"
     runtime._command = Command(OperatingMode.GRID_PRESERVATION, None, NOW, NOW + timedelta(minutes=30))
     await runtime.async_save_snapshot("replay-hold")
     runtime._command = Command(OperatingMode.SELF_CONSUMPTION)
@@ -317,7 +314,7 @@ async def test_replay_snapshot_restore_retains_valid_hold_and_rejects_invalid_at
     runtime._named_snapshots["invalid"] = json.dumps(saved)
     stored_evidence = dict(runtime._named_snapshots)
     before = (runtime._state, runtime._cumulative_ledger, runtime._clock.state, runtime._command)
-    with pytest.raises(ValueError, match="Stored command is invalid"):
+    with pytest.raises(ValueError, match="snapshot is invalid"):
         await runtime.async_restore_snapshot("invalid")
     assert (runtime._state, runtime._cumulative_ledger, runtime._clock.state, runtime._command) == before
     assert runtime._named_snapshots == stored_evidence

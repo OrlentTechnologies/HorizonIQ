@@ -55,10 +55,7 @@ from .simulation.topics import (
     node_red_status_topic,
     parse_refresh_payload,
     parse_victron_write_payload,
-    replay_request_topic,
-    replay_status_topic,
     simulator_status_topic,
-    clock_status_topic,
     refresh_topic,
     telemetry_payload,
     telemetry_topic,
@@ -72,7 +69,6 @@ from .simulation.runtime_status import (
     FaultsStatus,
     MqttStatusState,
     PlaybackStatusState,
-    ReplayStatusState,
     RuntimeStatus,
     SimulatorStatus,
     SimulatorStatusState,
@@ -94,7 +90,6 @@ from .simulation.command_lifecycle import (
 )
 from .direct_control import (
     DirectForecastRejection,
-    parse_replay_command,
     validate_period_generation,
     validate_virtual_recommendation,
 )
@@ -111,23 +106,6 @@ from .sandbox_storage import (
     STORAGE_SCHEMA_VERSION,
     SandboxStorage,
     record_mapping,
-)
-from .sandbox_profiles import SandboxProfileRepository
-from .simulation.local_profiles import LocalSyntheticProfile, aggregate_half_hours
-from .simulation.replay_contract import (
-    ReplayRequest,
-    ClockStatus,
-    ReplaySession,
-    ReplayState,
-    SIMULATED_REPLAY_API_FAILURE_REASON,
-    apply_remote_status,
-    build_clock_status,
-    build_replay_request,
-    create_replay_session,
-    start_replay_request,
-    stop_replay,
-    transition_local_replay,
-    validate_remote_status,
 )
 from .simulation.faults import (
     Fault,
@@ -161,24 +139,7 @@ _SANITIZED_STORAGE_RESTORE_MESSAGES = frozenset(
         "Stored GX identity does not match",
         "Stored numeric state is invalid",
         "Stored playback state is invalid",
-        "Stored profile changed; simulator playback is paused.",
-        "Stored profile could not be restored",
-        "Stored profile cursor is invalid; simulator playback is paused.",
-        "Stored profile cursor is invalid",
-        "Stored profile hash is invalid",
-        "Stored profile is unavailable; simulator playback is paused.",
-        "Stored profile selection is invalid",
         "Stored registration identity does not match",
-        "Stored replay cannot be reconstructed; it was not resumed.",
-        "Stored replay could not be restored",
-        "Stored replay profile identity is invalid",
-        "Stored replay request hash does not match",
-        "Stored replay resume state is invalid",
-        "Stored replay settings are invalid",
-        "Stored replay simulated API failure state is invalid",
-        "Stored replay starting energy is invalid",
-        "Stored replay state is incomplete",
-        "Stored replay state is invalid",
         "Stored sandbox controls are invalid",
         "Stored snapshot is invalid",
         "Stored snapshot limit is invalid",
@@ -202,20 +163,11 @@ if TYPE_CHECKING:
 _LOOP_INTERVAL_SECONDS = 1.0
 _SNAPSHOT_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
 _PLAYBACK_STATES = frozenset({"stopped", "paused", "running", "completed"})
-_REPLAY_ACTIVE_STATES = frozenset(
-    {ReplayState.REQUESTING, ReplayState.LOADING, ReplayState.READY}
-)
-_REPLAY_READINESS_TIMEOUT_SECONDS = 30
-_REPLAY_TIMEOUT_REASON = "Replay readiness timed out."
-_REPLAY_PUBLISH_FAILURE_REASON = "Replay request publication failed."
-_REPLAY_CLOCK_PUBLISH_FAILURE_REASON = "Replay clock publication failed."
-_REPLAY_HEARTBEAT_SECONDS = 30
-_REPLAY_CLOCK_MINIMUM_INTERVAL_SECONDS = 1
 MAX_BATTERY_ENERGY_WH = 2_000_000.0
 MAX_ABSOLUTE_POWER_W = 100_000.0
 _MAX_ENERGY_WH = MAX_BATTERY_ENERGY_WH
 _MAX_POWER_W = MAX_ABSOLUTE_POWER_W
-_OPERATING_MODES = frozenset({"virtual", "replay"})
+_OPERATING_MODES = frozenset({"virtual", "manual"})
 _CHARGING_SOURCES = frozenset({"virtual_battery", "external"})
 _DEFAULT_EXTERNAL_POWER_VALIDITY_SECONDS = 60
 _MAX_EXTERNAL_POWER_VALIDITY_SECONDS = 300
@@ -387,6 +339,7 @@ class HorizonIQEntryRuntime:
     _profile_cursor: ProfileCursor | None = None
     _task: asyncio.Task[None] | None = None
     _hass: HomeAssistant | None = None
+    _entry_hass: HomeAssistant | None = None
     _coordinator_paused: bool = False
     _mqtt_emulation_enabled: bool = True
     _direct_forecast_health: str = "unavailable"
@@ -400,35 +353,16 @@ class HorizonIQEntryRuntime:
     _live_forecast_now: Callable[[], datetime] = field(
         default=lambda: datetime.now(timezone.utc)
     )
-    _direct_replay_payload: Mapping[str, object] | None = None
-    _last_direct_replay_key: str | None = None
     _unloaded: bool = False
     _storage: SandboxStorage | None = None
+    _storage_restore_failed: bool = False
     _named_snapshots: dict[str, str] = field(default_factory=dict)
     storage_diagnostic: str | None = None
     _checkpoint_handle: asyncio.TimerHandle | None = None
-    _profile_repository: SandboxProfileRepository | None = None
-    _active_profile: LocalSyntheticProfile | None = None
-    _selected_profile_filename: str | None = None
-    _profile_hash: str | None = None
     _playback_state: str = "stopped"
     _unsubscribers: list[Callable[[], None]] = field(default_factory=list)
     _listeners: list[Callable[[], None]] = field(default_factory=list)
     _registration_config: Mapping[str, object] | None = None
-    _replay_session: ReplaySession | None = None
-    _replay_starting_energy_wh: float | None = None
-    _replay_import_for_export_enabled: bool | None = None
-    _replay_export_for_solar_headroom: bool | None = None
-    _replay_simulate_api_failure: bool = False
-    _replay_pending_resume: bool = False
-    _replay_timeout_handle: asyncio.TimerHandle | None = None
-    _prepared_replay_request: ReplayRequest | None = None
-    _replay_start_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    _last_replay_clock_status: ClockStatus | None = None
-    _replay_last_clock_publish_monotonic: float | None = None
-    _replay_heartbeat_handle: asyncio.TimerHandle | None = None
-    _replay_auto_resume_pending: bool = False
-    _replay_paused_rate: ClockRate | None = None
     _faults: tuple[Fault, ...] = ()
     _named_fault_snapshots: dict[str, tuple[Fault, ...]] = field(default_factory=dict)
     _fault_duration_handles: dict[str, asyncio.TimerHandle] = field(default_factory=dict)
@@ -515,16 +449,8 @@ class HorizonIQEntryRuntime:
 
     @property
     def can_set_state_of_charge(self) -> bool:
-        """Return whether the live state-of-charge control can act now."""
-        return (
-            self.simulator_enabled
-            and self._playback_state != "running"
-            and (
-                self._replay_session is None
-                or self._replay_session.state
-                not in (_REPLAY_ACTIVE_STATES | {ReplayState.RUNNING, ReplayState.PAUSED})
-            )
-        )
+        """Return whether this entry's live local control can act now."""
+        return self.simulator_enabled
 
     @property
     def reserve_percent(self) -> float | None:
@@ -601,7 +527,7 @@ class HorizonIQEntryRuntime:
     @property
     def solar_source(self) -> str:
         """Return the only source currently allowed to supply solar input."""
-        return "forecast" if self._operating_mode == "virtual" else "replay"
+        return "forecast" if self._operating_mode == "virtual" else "manual"
 
     @property
     def forecast_solar_reason(self) -> str | None:
@@ -639,7 +565,7 @@ class HorizonIQEntryRuntime:
     @property
     def time_source(self) -> str:
         """Return the bounded active timing source for diagnostics."""
-        return "wall_clock" if self._operating_mode == "virtual" else "replay_clock"
+        return "wall_clock" if self._operating_mode == "virtual" else "manual_clock"
 
     @property
     def timing_diagnostic(self) -> str | None:
@@ -677,10 +603,6 @@ class HorizonIQEntryRuntime:
             return self._command.requested_grid_power_w
         return None
 
-    @property
-    def selected_profile_filename(self) -> str | None:
-        """Return this runtime's selected owned profile filename."""
-        return self._selected_profile_filename
 
     @property
     def equipment_profile_name(self) -> str:
@@ -697,29 +619,6 @@ class HorizonIQEntryRuntime:
         """Return the selected profile's current sample cursor."""
         return self._profile_cursor
 
-    @property
-    def replay_session(self) -> ReplaySession | None:
-        """Return this entry's local replay session value data, if any."""
-        return self._replay_session
-
-    @property
-    def replay_state(self) -> ReplayState | None:
-        """Return the entry-local replay lifecycle state without a request payload."""
-        return self._replay_session.state if self._replay_session is not None else None
-
-    @property
-    def replay_reason(self) -> str | None:
-        """Return the last safe local or remote replay reason, if available."""
-        return (
-            self._replay_session.last_remote_reason
-            if self._replay_session is not None
-            else None
-        )
-
-    @property
-    def replay_pending_resume(self) -> bool:
-        """Return whether a restored interrupted session awaits a future resume flow."""
-        return self._replay_pending_resume
 
     @property
     def node_red_status(self) -> RuntimeStatus | None:
@@ -871,14 +770,14 @@ class HorizonIQEntryRuntime:
             raise ValueError("Sandbox operating mode is invalid")
         if mode == self._operating_mode:
             return
-        hass = self._hass
+        hass = self._hass or self._entry_hass
         wall_now = self._runtime_now_utc()
         was_enabled = self.simulator_enabled
         self._operating_mode = mode
         self._cancel_active_control()
         self.solar_w = 0.0
         self._clear_forecast_solar_diagnostics()
-        if mode == "replay":
+        if mode == "manual":
             # External instructions are meaningful only while Virtual mode
             # owns the wall-clock physics loop.
             self._charging_source = "virtual_battery"
@@ -886,15 +785,12 @@ class HorizonIQEntryRuntime:
             self._clear_pending_command()
             self._staged_direct_forecast = None
             self._staged_fresh_snapshot = None
-            self._direct_replay_payload = None
-            self._last_direct_replay_key = None
         if self._clock is not None:
             if mode == "virtual":
                 # Virtual mode owns no independently advancing clock. Keep a
                 # harmless current clock value only for snapshot compatibility.
                 self._clock.reset(self._runtime_now_utc())
                 self._clock.set_rate(ClockRate.PAUSED)
-                self._clear_replay_state_for_virtual()
                 self._initialize_virtual_schedule()
             else:
                 self._clock.reset(wall_now)
@@ -903,7 +799,7 @@ class HorizonIQEntryRuntime:
         if was_enabled:
             # A reload must always begin paused, regardless of the direction
             # of the mode transition.
-            await self.async_disable()
+            await self.async_disable(resume_coordinator=False)
         await self.async_checkpoint(immediate=True)
         self._notify_listeners()
         if hass is not None:
@@ -1033,19 +929,6 @@ class HorizonIQEntryRuntime:
             return 30 * 60
         return seconds if math.isfinite(seconds) and seconds > 0 else 30 * 60
 
-    def _clear_replay_state_for_virtual(self) -> None:
-        """Ensure no Replay profile, bridge state, or command crosses modes."""
-        self._cancel_replay_timeout()
-        self._cancel_replay_heartbeat()
-        self._clear_profile_state()
-        self._replay_session = None
-        self._replay_starting_energy_wh = None
-        self._replay_import_for_export_enabled = None
-        self._replay_export_for_solar_headroom = None
-        self._replay_simulate_api_failure = False
-        self._replay_pending_resume = False
-        self._replay_auto_resume_pending = False
-        self._prepared_replay_request = None
 
     def _clear_forecast_solar_diagnostics(self) -> None:
         """Forget only the transient forecast-to-solar selection state."""
@@ -1079,33 +962,40 @@ class HorizonIQEntryRuntime:
         self._forecast_solar_period_start_utc = period.starts_at_utc
         self._forecast_solar_generation_wh = generation_wh
 
-    def _validated_operating_configuration(
-        self, record_value: object
-    ) -> tuple[str, str]:
-        """Migrate pre-mode stores to safe Virtual built-in control defaults."""
+    def _validated_operating_configuration(self, record_value: object) -> tuple[str, str]:
+        """Map legacy Replay to paused Manual; validate current modes strictly."""
         record = record_mapping(record_value)
         if record is None:
             raise ValueError("Stored state is not an object")
-        storage_schema = record.get("storage_schema_version")
-        if storage_schema in {12, STORAGE_SCHEMA_VERSION}:
-            mode = record.get("operating_mode")
-            source = record.get("charging_source")
-            if mode not in _OPERATING_MODES or source not in _CHARGING_SOURCES:
-                raise ValueError("Stored operating mode or charging source is invalid")
-            return mode, source
-        if storage_schema != STORAGE_SCHEMA_VERSION:
-            # Before schema 12 every sandbox used the deterministic virtual
-            # clock. Restore those valid records as Replay to preserve their
-            # original timing and playback semantics.
-            return "replay", "virtual_battery"
-        raise ValueError("Stored operating mode or charging source is invalid")
+        version = record.get("storage_schema_version")
+        if type(version) is not int or not 1 <= version <= STORAGE_SCHEMA_VERSION:
+            raise ValueError("Unsupported storage schema")
+        mode = (
+            record.get("operating_mode", "virtual")
+            if version < STORAGE_SCHEMA_VERSION
+            else record.get("operating_mode")
+        )
+        if version < STORAGE_SCHEMA_VERSION and mode == "replay":
+            mode = "manual"
+        source = (
+            record.get("charging_source", "virtual_battery")
+            if version < STORAGE_SCHEMA_VERSION
+            else record.get("charging_source")
+        )
+        if (
+            not isinstance(mode, str) or mode not in _OPERATING_MODES
+            or not isinstance(source, str) or source not in _CHARGING_SOURCES
+        ):
+            raise ValueError("Stored operating mode or charging source is invalid")
+        return mode, "virtual_battery" if mode == "manual" else source
 
     async def async_restore_storage(self, hass: HomeAssistant) -> None:
-        """Restore only this entry's validated state, without inferring identity."""
+        """Validate all entry-owned retained values before committing a restore."""
         if not self.is_sandbox_configured or not self.entry_id:
             return
+        self._entry_hass = hass
         self._storage = SandboxStorage(hass, self.entry_id)
-        self._profile_repository = SandboxProfileRepository(hass, self.entry_id)
+        self._storage_restore_failed = False
         safe_snapshot = self._simulation_snapshot()
         safe_config = self._config
         stage = "load"
@@ -1114,702 +1004,77 @@ class HorizonIQEntryRuntime:
             if record is None:
                 return
             stage = "record_validation"
-            operating_mode, charging_source = self._validated_operating_configuration(
-                record
+            mode, source = self._validated_operating_configuration(record)
+            snapshot, enabled, snapshots, ledger, config = (
+                self._validated_storage_record(record, operating_mode=mode)
             )
-            (
-                snapshot,
-                enabled,
-                snapshots,
-                profile_state,
-                replay_state,
-                command_ledger,
-                control_config,
-            ) = self._validated_storage_record(record, operating_mode=operating_mode)
-            migrate_corrupted_ledger = _requires_ledger_migration(record)
-            if migrate_corrupted_ledger:
+            migrate_ledger = _requires_ledger_migration(record)
+            if migrate_ledger:
                 snapshot = _snapshot_without_corrupted_ledger(snapshot)
                 snapshots = {
-                    name: to_json(
-                        _snapshot_without_corrupted_ledger(from_json(snapshot_json))
-                    )
-                    for name, snapshot_json in snapshots.items()
+                    name: to_json(_snapshot_without_corrupted_ledger(from_json(value)))
+                    for name, value in snapshots.items()
                 }
             stage = "fault_validation"
             faults, fault_snapshots = self._validated_fault_storage(
                 record, expected_snapshot_names=set(snapshots)
             )
-            self._config = control_config
-            self._operating_mode = operating_mode
-            self._charging_source = charging_source
+            # Stop and await owned work only after the candidate is complete.
+            await self.async_disable(resume_coordinator=False, checkpoint=False)
+            self._cancel_all_fault_work()
+            self._config = config
+            self._operating_mode = mode
+            self._charging_source = source
             self._apply_snapshot(snapshot)
             self.load_w = snapshot.load_w
-            self.solar_w = snapshot.solar_w
+            self.solar_w = snapshot.solar_w if mode == "manual" else 0.0
             self._named_snapshots = snapshots
             self._faults = faults
             self._named_fault_snapshots = fault_snapshots
-            self._accepted_command_ids = command_ledger
+            self._accepted_command_ids = ledger
             self._clear_pending_command()
             self._reset_node_red_status()
-            if operating_mode == "virtual":
-                # Forecast solar is derived from the active period and must
-                # never resume from a persisted manual/replay sample.
-                self.solar_w = 0.0
+            self._clear_external_power()
+            self._staged_direct_forecast = None
+            self._staged_fresh_snapshot = None
+            self._command = Command(OperatingMode.SELF_CONSUMPTION)
+            self.last_command_status = CommandStatus.FALLBACK_MISSING
+            self._playback_state = "stopped"
+            if record["storage_schema_version"] < STORAGE_SCHEMA_VERSION:
+                self._clock = VirtualClock.from_state(
+                    replace(self._clock.state, rate=ClockRate.PAUSED.value)
+                )
+            if mode == "virtual":
+                self._clock = VirtualClock.from_state(
+                    ClockState(self._runtime_now_utc(), ClockRate.PAUSED.value)
+                )
                 self._clear_forecast_solar_diagnostics()
-                self._command = Command(OperatingMode.SELF_CONSUMPTION)
-                self._last_direct_command_id = None
-                self._last_direct_action = None
-                self._staged_direct_forecast = None
-                self._staged_fresh_snapshot = None
-                self._clear_external_power()
-                self._clear_replay_state_for_virtual()
-                if self._clock is not None:
-                    self._clock.reset(self._runtime_now_utc())
-                    self._clock.set_rate(ClockRate.PAUSED)
                 self.storage_diagnostic = "ignored_virtual_clock"
-                profile_state = (None, None, "stopped")
-                replay_state = (None, None, None, None, False, False, False)
-            stage = "profile_restore"
-            if not await self._async_restore_profile_state(profile_state):
-                raise ValueError(
-                    self.storage_diagnostic or "Stored profile could not be restored"
-                )
-            stage = "replay_restore"
-            if not await self._async_restore_replay_state(replay_state):
-                raise ValueError(
-                    self.storage_diagnostic or "Stored replay could not be restored"
-                )
-            stage = "enable"
-            if enabled:
+            # Setup also asks the coordinator to refresh. Keep restored paused
+            # entries and Manual mode local until an explicit Virtual enable.
+            if (
+                mode == "manual" or not enabled
+                or record["storage_schema_version"] < STORAGE_SCHEMA_VERSION
+            ):
+                await self.coordinator.async_pause_for_sandbox()
+                self._coordinator_paused = True
+            # Legacy records must never resume network or executable work.
+            if enabled and record["storage_schema_version"] == STORAGE_SCHEMA_VERSION:
+                stage = "enable"
                 await self.async_enable(hass, checkpoint_on_failure=False)
-            if migrate_corrupted_ledger:
-                self.storage_diagnostic = (
-                    "Migrated schema-10 simulator ledgers; cumulative ledgers were reset."
-                )
+            if record["storage_schema_version"] < STORAGE_SCHEMA_VERSION:
                 await self.async_checkpoint(immediate=True)
+            if migrate_ledger:
+                self.storage_diagnostic = "Migrated schema-10 simulator ledgers; cumulative ledgers were reset."
+            self._notify_listeners()
         except Exception as err:
             message = _storage_restore_diagnostic(stage, err)
             _LOGGER.warning("%s", message)
             await self._async_restore_safe_default(safe_snapshot, safe_config)
+            self._storage_restore_failed = True
             self.storage_diagnostic = message
             self._notify_listeners()
 
-    async def async_list_profile_filenames(self) -> tuple[str, ...]:
-        """List only this entry's direct-child supported profile files."""
-        if self._profile_repository is None or self._config is None:
-            return ()
-        valid: list[str] = []
-        for filename in await self._profile_repository.async_list_filenames():
-            try:
-                await self._profile_repository.async_load(filename, self._config)
-            except ValueError:
-                continue
-            valid.append(filename)
-        return tuple(valid)
-
-    async def async_load_profile(
-        self,
-        filename: str,
-    ) -> tuple[LocalSyntheticProfile, str]:
-        """Validate one owned profile without mutating simulator state."""
-        if self._profile_repository is None or self._config is None:
-            raise ValueError("Sandbox profile storage is unavailable")
-        return await self._profile_repository.async_load(filename, self._config)
-
-    async def async_select_profile(self, filename: str) -> None:
-        """Select a validated owned profile and reset its local cursor."""
-        profile, content_hash = await self.async_load_profile(filename)
-        self._active_profile = profile
-        self._selected_profile_filename = filename
-        self._profile_hash = content_hash
-        self._active_profile_id = profile.identifier
-        self._profile_cursor = ProfileCursor(profile.identifier, 0)
-        self._playback_state = "paused"
-        self.load_w = 0.0
-        self.solar_w = 0.0
-        self._command = Command(OperatingMode.SELF_CONSUMPTION)
-        if self._clock is not None:
-            self._clock.reset(profile.samples[0].timestamp_utc)
-        if profile.starting_battery_energy_wh is not None:
-            self._state = BatteryState(profile.starting_battery_energy_wh)
-            self._last_grid_power_w = 0.0
-            self._last_battery_power_w = 0.0
-        if self.simulator_enabled:
-            await self._async_publish_telemetry_snapshot()
-        await self.async_checkpoint(immediate=True)
-        await self._async_publish_runtime_statuses(force=True)
-        self._notify_listeners()
-
-    async def async_start_playback(self) -> None:
-        """Start deterministic local playback from the selected cursor."""
-        if not self.simulator_enabled or self._active_profile is None:
-            raise ValueError("A selected profile requires an active sandbox")
-        if self._profile_cursor is None:
-            raise ValueError("Profile cursor is unavailable")
-        if self._replay_session is not None and self._replay_session.state is ReplayState.PAUSED:
-            self._replay_session = transition_local_replay(
-                self._replay_session,
-                ReplayState.RUNNING,
-            )
-            if self._clock is not None:
-                self._clock.set_rate(self._replay_paused_rate or ClockRate.X1)
-            await self._async_publish_replay_clock(immediate=True)
-            self._schedule_replay_heartbeat()
-        self._playback_state = "running"
-        await self.async_checkpoint(immediate=True)
-        await self._async_publish_runtime_statuses(force=True)
-        self._notify_listeners()
-
-    async def async_pause_playback(self) -> None:
-        """Pause playback without changing the virtual clock or cursor."""
-        if self._active_profile is None:
-            raise ValueError("No profile is selected")
-        self._playback_state = "paused"
-        if self._clock is not None:
-            self._replay_paused_rate = ClockRate(self._clock.state.rate)
-            self._clock.set_rate(ClockRate.PAUSED)
-        if self._replay_session is not None and self._replay_session.state is ReplayState.RUNNING:
-            self._replay_session = transition_local_replay(
-                self._replay_session,
-                ReplayState.PAUSED,
-            )
-            await self._async_publish_replay_clock(immediate=True)
-            self._schedule_replay_heartbeat()
-        await self.async_checkpoint(immediate=True)
-        await self._async_publish_runtime_statuses(force=True)
-        self._notify_listeners()
-
-    async def async_stop_playback(self) -> None:
-        """Stop playback and return this sandbox to safe self-consumption."""
-        self._playback_state = "stopped"
-        self.load_w = 0.0
-        self.solar_w = 0.0
-        self._command = Command(OperatingMode.SELF_CONSUMPTION)
-        if self._replay_session is not None and self._replay_session.state in {
-            ReplayState.RUNNING,
-            ReplayState.PAUSED,
-        }:
-            await self.async_stop_replay_session()
-        await self.async_checkpoint(immediate=True)
-        await self._async_publish_runtime_statuses(force=True)
-        self._notify_listeners()
-
-    async def async_reset_playback(self) -> None:
-        """Reset the selected profile cursor without loading another file."""
-        if self._active_profile is None:
-            raise ValueError("No profile is selected")
-        self._profile_cursor = ProfileCursor(self._active_profile.identifier, 0)
-        self._playback_state = "paused"
-        if self._clock is not None:
-            self._clock.reset(self._active_profile.samples[0].timestamp_utc)
-        if self.simulator_enabled:
-            await self._async_publish_telemetry_snapshot()
-        await self.async_checkpoint(immediate=True)
-        await self._async_publish_runtime_statuses(force=True)
-        self._notify_listeners()
-
-    async def async_prepare_replay_session(self) -> ReplaySession:
-        """Build one new local replay session from trusted entry-owned inputs."""
-        self._require_replay_startable()
-        profile, content_hash = await self._async_revalidate_selected_profile()
-        if self._config is None or self._state is None:
-            raise ValueError("Sandbox state is unavailable")
-        import_for_export, export_for_solar_headroom = self._trusted_replay_toggles()
-        starting_energy_wh = (
-            profile.starting_battery_energy_wh
-            if profile.starting_battery_energy_wh is not None
-            else self._state.energy_wh
-        )
-        request = build_replay_request(
-            periods=aggregate_half_hours(profile),
-            starting_battery_energy_wh=starting_energy_wh,
-            config=self._config,
-            import_for_export_enabled=import_for_export,
-            export_for_solar_headroom=export_for_solar_headroom,
-            simulate_api_failure=self._consume_replay_api_failure_fault(),
-        )
-        self._replay_starting_energy_wh = starting_energy_wh
-        self._replay_import_for_export_enabled = import_for_export
-        self._replay_export_for_solar_headroom = export_for_solar_headroom
-        self._replay_pending_resume = False
-        self._replay_session = create_replay_session(
-            request,
-            profile_identifier=profile.identifier,
-            profile_hash=content_hash,
-        )
-        self._prepared_replay_request = request
-        return self._replay_session
-
-    async def async_start_replay_session(self) -> ReplaySession:
-        """Start one replay request through the entry-local MQTT contract."""
-        async with self._replay_start_lock:
-            if (
-                self._replay_session is not None
-                and self._replay_session.state is ReplayState.IDLE
-                and self._prepared_replay_request is not None
-            ):
-                session = self._replay_session
-            else:
-                session = await self.async_prepare_replay_session()
-            request = self._prepared_replay_request
-            if request is None or self._config is None or self._clock is None:
-                raise ValueError("Sandbox runtime is unavailable")
-            self._replay_session = start_replay_request(session)
-            try:
-                await self._async_publish_outbound(
-                    replay_request_topic(self.pretend_gx_id or ""),
-                    json.dumps(request.to_payload(), separators=(",", ":")),
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                await self._async_fail_replay(_REPLAY_PUBLISH_FAILURE_REASON)
-                return self._replay_session
-            self._prepared_replay_request = None
-            self._schedule_replay_timeout(self._replay_session.replay_id)
-            await self.async_checkpoint(immediate=True)
-            await self._async_publish_runtime_statuses(force=True)
-            self._notify_listeners()
-            return self._replay_session
-
-    def _consume_replay_api_failure_fault(self) -> bool:
-        """Consume one configured simulated Node-RED API failure at request formation."""
-        fault = self._active_fault(FaultKind.REPLAY_API_FAILURE)
-        if fault is None:
-            self._replay_simulate_api_failure = False
-            return False
-        self._consume_outbound_fault(FaultKind.REPLAY_API_FAILURE)
-        self._replay_simulate_api_failure = True
-        return True
-
-    async def async_retry_replay_session(self) -> ReplaySession:
-        """Explicitly create and publish a new UUID after a terminal failure."""
-        if self._replay_session is None or self._replay_session.state not in {
-            ReplayState.REJECTED,
-            ReplayState.FAILED,
-        }:
-            raise ValueError("Only a rejected or failed replay can be retried")
-        self._replay_session = None
-        self._replay_starting_energy_wh = None
-        self._replay_import_for_export_enabled = None
-        self._replay_export_for_solar_headroom = None
-        self._replay_simulate_api_failure = False
-        return await self.async_start_replay_session()
-
-    async def _async_resume_pending_replay(self) -> None:
-        """Republish one identity/hash-checked interrupted request after MQTT setup."""
-        if (
-            not self._replay_auto_resume_pending
-            or self._replay_session is None
-            or self._replay_session.state is not ReplayState.STOPPED
-            or self._hass is None
-            or self.pretend_gx_id is None
-            or self._config is None
-            or self._replay_starting_energy_wh is None
-            or self._replay_import_for_export_enabled is None
-            or self._replay_export_for_solar_headroom is None
-        ):
-            return
-        try:
-            profile, content_hash = await self._async_revalidate_selected_profile()
-            request = build_replay_request(
-                periods=aggregate_half_hours(profile),
-                starting_battery_energy_wh=self._replay_starting_energy_wh,
-                config=self._config,
-                import_for_export_enabled=self._replay_import_for_export_enabled,
-                export_for_solar_headroom=self._replay_export_for_solar_headroom,
-                replay_id=self._replay_session.replay_id,
-                simulate_api_failure=self._replay_simulate_api_failure,
-            )
-            rebuilt = create_replay_session(
-                request,
-                profile_identifier=profile.identifier,
-                profile_hash=content_hash,
-            )
-            if rebuilt.request_hash != self._replay_session.request_hash:
-                raise ValueError("Stored replay request hash does not match")
-            self._replay_session = replace(
-                self._replay_session,
-                state=ReplayState.REQUESTING,
-            )
-            await self._async_publish_outbound(
-                replay_request_topic(self.pretend_gx_id),
-                json.dumps(request.to_payload(), separators=(",", ":")),
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            await self._async_fail_replay(_REPLAY_PUBLISH_FAILURE_REASON)
-            return
-        self._schedule_replay_timeout(self._replay_session.replay_id)
-        await self._async_publish_runtime_statuses(force=True)
-
-    async def async_stop_replay_session(self) -> None:
-        """Stop this entry's replay lifecycle without publishing a bridge command."""
-        if self._replay_session is None:
-            raise ValueError("No replay session exists")
-        self._cancel_replay_timeout()
-        self._cancel_replay_heartbeat()
-        if self._replay_session.state in _REPLAY_ACTIVE_STATES:
-            self._replay_session = stop_replay(self._replay_session)
-        else:
-            self._replay_session = replace(self._replay_session, state=ReplayState.STOPPED)
-        self._replay_pending_resume = False
-        self._replay_auto_resume_pending = False
-        self._prepared_replay_request = None
-        self._direct_replay_payload = None
-        self._last_direct_replay_key = None
-        self._staged_direct_forecast = None
-        self._staged_fresh_snapshot = None
-        self._last_direct_command_id = None
-        self._last_direct_action = None
-        self._direct_forecast_health = "unavailable"
-        self._playback_state = "stopped"
-        self.load_w = 0.0
-        self.solar_w = 0.0
-        self._command = Command(OperatingMode.SELF_CONSUMPTION)
-        self._move_clock_to_replay_end()
-        await self._async_publish_replay_clock(
-            reset=self._last_replay_clock_status is None,
-            immediate=True,
-        )
-        await self.async_checkpoint(immediate=True)
-        await self._async_publish_runtime_statuses(force=True)
-        self._notify_listeners()
-
-    async def _async_revalidate_selected_profile(
-        self,
-    ) -> tuple[LocalSyntheticProfile, str]:
-        if (
-            self._selected_profile_filename is None
-            or self._profile_hash is None
-            or self._active_profile is None
-        ):
-            raise ValueError("A selected profile is required for replay")
-        profile, content_hash = await self.async_load_profile(self._selected_profile_filename)
-        if content_hash != self._profile_hash or profile.identifier != self._active_profile.identifier:
-            raise ValueError("Selected profile changed; replay cannot start")
-        return profile, content_hash
-
-    def _require_replay_startable(self) -> None:
-        if self._unloaded or not self.simulator_enabled or self._hass is None:
-            raise ValueError("An enabled sandbox MQTT runtime is required")
-        if not self.is_sandbox_configured:
-            raise ValueError("Sandbox is unavailable")
-        if not self._mqtt_emulation_enabled:
-            raise ValueError("Sandbox MQTT transport is unavailable")
-        if self._replay_session is not None and self._replay_session.state in (
-            _REPLAY_ACTIVE_STATES | {ReplayState.RUNNING, ReplayState.PAUSED}
-        ):
-            raise ValueError("A replay request is already active")
-        if self._replay_session is not None and self._replay_session.state in {
-            ReplayState.REJECTED,
-            ReplayState.FAILED,
-        }:
-            raise ValueError("Retry the failed replay explicitly")
-
-    def _trusted_replay_toggles(self) -> tuple[bool, bool]:
-        config = self._registration_config
-        if config is None:
-            raise ValueError("Registration replay settings are unavailable")
-        return (
-            _registration_toggle(config, "ImportForExport", "importForExport"),
-            _registration_toggle(
-                config,
-                "ExportForSolarHeadroom",
-                "exportForSolarHeadroom",
-            ),
-        )
-
-    async def _async_start_ready_replay(self) -> None:
-        """Start local playback once after the sole accepted ready transition."""
-        if self._replay_session is None or self._replay_session.state is not ReplayState.READY:
-            return
-        try:
-            profile, content_hash = await self._async_revalidate_selected_profile()
-            if (
-                self._state is None
-                or self._clock is None
-                or self._replay_starting_energy_wh is None
-                or content_hash != self._replay_session.profile_hash
-            ):
-                raise ValueError("Replay profile is unavailable")
-            resuming = self._replay_auto_resume_pending
-            if not resuming:
-                self._state = BatteryState(self._replay_starting_energy_wh)
-                self._clock.reset(profile.samples[0].timestamp_utc)
-                self._profile_cursor = ProfileCursor(profile.identifier, 0)
-            elif self._profile_cursor is None or self._profile_cursor.profile_id != profile.identifier:
-                raise ValueError("Stored replay cursor is unavailable")
-            if self._clock.state.rate == ClockRate.PAUSED.value:
-                self._clock.set_rate(ClockRate.X1)
-            self._playback_state = "running"
-            self._last_replay_clock_status = None
-            self._replay_last_clock_publish_monotonic = None
-            self._replay_session = transition_local_replay(
-                self._replay_session,
-                ReplayState.RUNNING,
-            )
-            self._replay_pending_resume = False
-            self._replay_auto_resume_pending = False
-            await self._async_publish_replay_clock(reset=True, immediate=True)
-        except (HomeAssistantError, ValueError):
-            await self._async_fail_replay(_REPLAY_CLOCK_PUBLISH_FAILURE_REASON)
-            return
-        self._schedule_replay_heartbeat()
-        await self.async_checkpoint(immediate=True)
-        await self._async_publish_runtime_statuses(force=True)
-        self._notify_listeners()
-
-    async def _async_publish_replay_clock(
-        self,
-        *,
-        reset: bool = False,
-        immediate: bool = False,
-    ) -> bool:
-        """Publish one bounded, non-retained virtual-clock status for this replay."""
-        if (
-            self._unloaded
-            or self._hass is None
-            or self.pretend_gx_id is None
-            or self._clock is None
-            or self._replay_session is None
-            or self._replay_session.state
-            not in {ReplayState.RUNNING, ReplayState.PAUSED, ReplayState.COMPLETED, ReplayState.STOPPED}
-        ):
-            return False
-        now = self._hass.loop.time()
-        if (
-            not reset
-            and self._replay_last_clock_publish_monotonic is not None
-            and now - self._replay_last_clock_publish_monotonic
-            < _REPLAY_CLOCK_MINIMUM_INTERVAL_SECONDS
-        ):
-            return False
-        try:
-            status = build_clock_status(
-                gx_device_id=self.pretend_gx_id,
-                replay_id=self._replay_session.replay_id,
-                virtual_time_utc=self._clock.state.virtual_time_utc,
-                previous=self._last_replay_clock_status,
-                reset=reset,
-            )
-            await self._async_publish_outbound(
-                clock_status_topic(self.pretend_gx_id),
-                json.dumps(status.to_payload(), separators=(",", ":")),
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            await self._async_fail_replay(_REPLAY_CLOCK_PUBLISH_FAILURE_REASON)
-            return False
-        self._last_replay_clock_status = status
-        self._replay_last_clock_publish_monotonic = now
-        self._replay_session = replace(self._replay_session, clock_sequence=status.sequence)
-        return True
-
-    async def _async_fail_replay(self, reason: str) -> None:
-        """Fail only the owning replay and return its local inputs to a safe state."""
-        self._cancel_replay_timeout()
-        self._cancel_replay_heartbeat()
-        if self._replay_session is not None:
-            self._replay_session = replace(
-                self._replay_session,
-                state=ReplayState.FAILED,
-                last_remote_reason=reason,
-            )
-        self._playback_state = "stopped"
-        self.load_w = 0.0
-        self.solar_w = 0.0
-        self._command = Command(OperatingMode.SELF_CONSUMPTION)
-        self._replay_pending_resume = False
-        self._replay_auto_resume_pending = False
-        if self._storage is not None:
-            await self.async_checkpoint(immediate=True)
-        await self._async_publish_runtime_statuses(force=True)
-        self._notify_listeners()
-
-    def _schedule_replay_heartbeat(self) -> None:
-        self._cancel_replay_heartbeat()
-        if self._hass is None or self._unloaded:
-            return
-        self._replay_heartbeat_handle = self._hass.loop.call_later(
-            _REPLAY_HEARTBEAT_SECONDS,
-            self._async_replay_heartbeat_due,
-        )
-
-    def _async_replay_heartbeat_due(self) -> None:
-        self._replay_heartbeat_handle = None
-        if self._hass is not None:
-            self._hass.async_create_task(self._async_replay_heartbeat())
-
-    async def _async_replay_heartbeat(self) -> None:
-        if (
-            self._unloaded
-            or not self.simulator_enabled
-            or self._mqtt_fault_disconnected
-            or self._replay_session is None
-            or self._replay_session.state not in {ReplayState.RUNNING, ReplayState.PAUSED}
-        ):
-            return
-        await self._async_publish_replay_clock(immediate=True)
-        if self._replay_session is not None and self._replay_session.state in {
-            ReplayState.RUNNING,
-            ReplayState.PAUSED,
-        }:
-            self._schedule_replay_heartbeat()
-
-    def _cancel_replay_heartbeat(self) -> None:
-        if self._replay_heartbeat_handle is not None:
-            self._replay_heartbeat_handle.cancel()
-            self._replay_heartbeat_handle = None
-
-    async def _async_complete_replay(self) -> None:
-        """Finish the local profile exactly once and send its terminal clock position."""
-        if self._replay_session is None:
-            self._playback_state = "completed"
-            self.load_w = 0.0
-            self.solar_w = 0.0
-            self._command = Command(OperatingMode.SELF_CONSUMPTION)
-            self._notify_listeners()
-            return
-        if self._replay_session.state not in {ReplayState.RUNNING, ReplayState.PAUSED}:
-            return
-        self._playback_state = "completed"
-        self.load_w = 0.0
-        self.solar_w = 0.0
-        self._command = Command(OperatingMode.SELF_CONSUMPTION)
-        self._move_clock_to_replay_end()
-        self._replay_session = transition_local_replay(
-            self._replay_session,
-            ReplayState.COMPLETED,
-        )
-        self._cancel_replay_heartbeat()
-        await self._async_publish_replay_clock(immediate=True)
-        await self._async_publish_telemetry_snapshot()
-        await self.async_checkpoint(immediate=True)
-        await self._async_publish_runtime_statuses(force=True)
-        self._notify_listeners()
-
-    def _move_clock_to_replay_end(self) -> None:
-        if self._active_profile is None or self._clock is None:
-            return
-        replay_end = self._active_profile.samples[-1].timestamp_utc + timedelta(minutes=5)
-        current = self._clock.state.virtual_time_utc
-        if current < replay_end:
-            self._clock.step((replay_end - current).total_seconds())
-
-    async def _async_restore_profile_state(
-        self,
-        profile_state: tuple[str | None, str | None, str],
-    ) -> bool:
-        filename, expected_hash, playback_state = profile_state
-        if filename is None:
-            self._playback_state = "stopped"
-            return True
-        try:
-            profile, content_hash = await self.async_load_profile(filename)
-        except ValueError:
-            self.storage_diagnostic = "Stored profile is unavailable; simulator playback is paused."
-            self._clear_profile_state()
-            return False
-        if content_hash != expected_hash:
-            self.storage_diagnostic = "Stored profile changed; simulator playback is paused."
-            self._clear_profile_state()
-            return False
-        if self._profile_cursor is None or self._profile_cursor.profile_id != profile.identifier:
-            self.storage_diagnostic = "Stored profile cursor is invalid; simulator playback is paused."
-            self._clear_profile_state()
-            return False
-        if self._profile_cursor.index < 0 or self._profile_cursor.index > len(profile.samples):
-            self.storage_diagnostic = "Stored profile cursor is invalid; simulator playback is paused."
-            self._clear_profile_state()
-            return False
-        self._active_profile = profile
-        self._selected_profile_filename = filename
-        self._profile_hash = content_hash
-        self._playback_state = playback_state
-        return True
-
-    def _clear_profile_state(self) -> None:
-        self._active_profile = None
-        self._selected_profile_filename = None
-        self._profile_hash = None
-        self._active_profile_id = None
-        self._profile_cursor = None
-        self._playback_state = "paused"
-
-    async def _async_restore_replay_state(
-        self,
-        replay_state: tuple[
-            ReplaySession | None,
-            float | None,
-            bool | None,
-            bool | None,
-            bool,
-            bool,
-            bool,
-        ],
-    ) -> bool:
-        (
-            session,
-            starting_energy,
-            import_for_export,
-            export_for_solar_headroom,
-            pending_resume,
-            auto_resume,
-            simulate_api_failure,
-        ) = replay_state
-        if session is None:
-            return True
-        try:
-            profile, content_hash = await self._async_revalidate_selected_profile()
-            if (
-                self._config is None
-                or starting_energy is None
-                or import_for_export is None
-                or export_for_solar_headroom is None
-            ):
-                raise ValueError("Stored replay state is incomplete")
-            request = build_replay_request(
-                periods=aggregate_half_hours(profile),
-                starting_battery_energy_wh=starting_energy,
-                config=self._config,
-                import_for_export_enabled=import_for_export,
-                export_for_solar_headroom=export_for_solar_headroom,
-                replay_id=session.replay_id,
-                simulate_api_failure=simulate_api_failure,
-            )
-            rebuilt = create_replay_session(
-                request,
-                profile_identifier=profile.identifier,
-                profile_hash=content_hash,
-            )
-            if rebuilt.request_hash != session.request_hash:
-                raise ValueError("Stored replay request hash does not match")
-        except ValueError:
-            self._replay_session = replace(
-                session,
-                state=ReplayState.FAILED,
-                last_remote_reason="Stored replay cannot be reconstructed.",
-            )
-            self._replay_pending_resume = False
-            self._replay_auto_resume_pending = False
-            self.storage_diagnostic = "Stored replay cannot be reconstructed; it was not resumed."
-            return False
-        self._replay_starting_energy_wh = starting_energy
-        self._replay_import_for_export_enabled = import_for_export
-        self._replay_export_for_solar_headroom = export_for_solar_headroom
-        self._replay_simulate_api_failure = simulate_api_failure
-        if session.state in _REPLAY_ACTIVE_STATES or pending_resume:
-            self._replay_session = replace(session, state=ReplayState.STOPPED)
-            self._replay_pending_resume = True
-            self._replay_auto_resume_pending = auto_resume
-        else:
-            self._replay_session = session
-            self._replay_pending_resume = False
-            self._replay_auto_resume_pending = False
-        return True
 
     async def async_checkpoint(
         self,
@@ -1818,7 +1083,10 @@ class HorizonIQEntryRuntime:
         enabled_override: bool | None = None,
     ) -> None:
         """Save a minimal entry-local checkpoint immediately or with debounce."""
-        if self._storage is None or not self.is_sandbox_configured:
+        if (
+            self._storage is None or self._storage_restore_failed
+            or not self.is_sandbox_configured
+        ):
             return
         if immediate:
             self._cancel_pending_checkpoint()
@@ -1844,94 +1112,58 @@ class HorizonIQEntryRuntime:
         return tuple(sorted(self._named_snapshots))
 
     async def async_restore_snapshot(self, name: str) -> None:
-        """Atomically restore one validated local snapshot without I/O side effects."""
+        """Restore only a completely validated local snapshot and its faults."""
         normalized = _snapshot_name(name)
-        try:
-            serialized = self._named_snapshots[normalized]
-        except KeyError as err:
-            raise ValueError("Snapshot does not exist") from err
-        raw_snapshot = from_json(serialized)
-        restored_config = (
-            _control_config_from_storage(raw_snapshot.control_config, fallback=self._config)
-            if raw_snapshot.control_config is not None and self._config is not None
+        if normalized not in self._named_snapshots:
+            raise ValueError("Snapshot does not exist")
+        raw = from_json(self._named_snapshots[normalized])
+        config = (
+            _control_config_from_storage(raw.control_config, fallback=self._config)
+            if raw.control_config is not None and self._config is not None
             else self._config
         )
-        snapshot = self._validated_snapshot(raw_snapshot, config=restored_config)
+        snapshot = self._validated_snapshot(raw, config=config)
+        faults = (
+            validate_faults(list(raw.faults))
+            if raw.faults else self._named_fault_snapshots.get(normalized, ())
+        )
+        validate_faults([fault.to_dict() for fault in faults])
         if self._operating_mode == "virtual":
             snapshot = replace(
                 snapshot,
-                clock_state=ClockState(
-                    self._runtime_now_utc(), ClockRate.PAUSED.value, 0, 0
-                ),
-                active_profile_id=None,
-                profile_cursor=None,
-                active_command=Command(OperatingMode.SELF_CONSUMPTION),
-                command_status=CommandStatus.NO_ACTION,
-                playback_state="stopped",
-                selected_profile_filename=None,
-                profile_hash=None,
-                replay_session=None,
+                clock_state=ClockState(self._runtime_now_utc(), ClockRate.PAUSED.value),
+                active_command=None,
+                command_status=CommandStatus.FALLBACK_MISSING,
             )
-        restored_faults = (
-            validate_faults(list(raw_snapshot.faults))
-            if raw_snapshot.faults
-            else self._named_fault_snapshots.get(normalized, ())
-        )
-        validate_faults([fault.to_dict() for fault in restored_faults])
-        restored_profile: LocalSyntheticProfile | None = None
-        if snapshot.selected_profile_filename is not None:
-            restored_profile, restored_hash = await self.async_load_profile(
-                snapshot.selected_profile_filename
-            )
-            if restored_hash != snapshot.profile_hash or (
-                snapshot.profile_cursor is not None
-                and snapshot.profile_cursor.profile_id != restored_profile.identifier
-            ):
-                raise ValueError("Snapshot profile cannot be reconstructed")
-        restored_replay = (
-            ReplaySession.from_dict(snapshot.replay_session)
-            if snapshot.replay_session is not None
-            else None
-        )
-        # Commit only after the whole snapshot and its fault companion have
-        # validated. The duplicate ledger deliberately remains untouched.
+        was_enabled = self.simulator_enabled
+        hass = self._hass
+        task, self._task = self._task, None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         self._cancel_all_fault_work()
         self._clear_pending_command()
-        self._cancel_replay_timeout()
-        self._cancel_replay_heartbeat()
-        if restored_config is not None:
-            self._config = restored_config
+        if config is not None:
+            self._config = config
         self._apply_snapshot(snapshot)
         self.load_w = snapshot.load_w
-        self.solar_w = snapshot.solar_w
-        self._playback_state = snapshot.playback_state
-        self._selected_profile_filename = snapshot.selected_profile_filename
-        self._profile_hash = snapshot.profile_hash
-        self._active_profile = restored_profile
-        # Remote readiness is intentionally never recreated by a local
-        # snapshot. Preserve only validated local replay identity/state and
-        # require an explicit start before publishing again.
-        self._replay_session = (
-            replace(restored_replay, state=ReplayState.STOPPED)
-            if restored_replay is not None
-            else None
+        self.solar_w = snapshot.solar_w if self._operating_mode == "manual" else 0.0
+        self._playback_state = "stopped"
+        self._named_snapshots[normalized] = to_json(
+            replace(snapshot, faults=tuple(fault.to_dict() for fault in faults))
         )
-        self._replay_pending_resume = restored_replay is not None
-        self._replay_auto_resume_pending = False
-        self._faults = restored_faults
+        self._faults = faults
         self._mqtt_fault_disconnected = False
         self._reset_node_red_status()
-        if self._replay_session is not None:
-            # A local snapshot cannot prove that the external replay bridge is
-            # still ready. Keep the restored manual inputs, but require a new
-            # explicit replay start before the bridge can influence them.
-            self._playback_state = "stopped"
-            self._command = Command(OperatingMode.SELF_CONSUMPTION)
-        for fault in self._faults:
-            if fault.state is FaultState.ACTIVE:
-                self._schedule_fault_expiry(fault)
-                if fault.kind is FaultKind.MQTT_DISCONNECT:
-                    await self._async_enter_fault_disconnect(fault)
+        if was_enabled and hass is not None:
+            for fault in self._faults:
+                if fault.state is FaultState.ACTIVE:
+                    self._schedule_fault_expiry(fault)
+                    if fault.kind is FaultKind.MQTT_DISCONNECT:
+                        await self._async_enter_fault_disconnect(fault)
+            self._task = hass.async_create_background_task(
+                self._async_loop(hass), f"{DOMAIN} sandbox simulation {self.entry_id}"
+            )
         self._notify_listeners()
         await self.async_checkpoint(immediate=True)
 
@@ -1966,18 +1198,7 @@ class HorizonIQEntryRuntime:
             "charging_source": self._charging_source,
             "current_snapshot": to_json(self._simulation_snapshot()),
             "snapshots": dict(self._named_snapshots),
-            "selected_profile_filename": self._selected_profile_filename,
-            "profile_hash": self._profile_hash,
             "playback_state": self._playback_state,
-            "replay_session": (
-                self._replay_session.to_dict() if self._replay_session is not None else None
-            ),
-            "replay_starting_energy_wh": self._replay_starting_energy_wh,
-            "replay_import_for_export_enabled": self._replay_import_for_export_enabled,
-            "replay_export_for_solar_headroom": self._replay_export_for_solar_headroom,
-            "replay_simulate_api_failure": self._replay_simulate_api_failure,
-            "replay_pending_resume": self._replay_pending_resume,
-            "replay_auto_resume_pending": self._replay_auto_resume_pending,
             "accepted_command_ids": ledger_to_storage(
                 prune_command_ledger(
                     self._accepted_command_ids,
@@ -1993,15 +1214,24 @@ class HorizonIQEntryRuntime:
             "control_config": _control_config_to_storage(self._config),
         }
 
+    @staticmethod
+    def _validated_stored_faults(value: object, *, legacy: bool) -> tuple[Fault, ...]:
+        if legacy and isinstance(value, list):
+            value = [
+                item for item in value
+                if not (isinstance(item, Mapping) and item.get("kind") == "replay_api_failure")
+            ]
+        return validate_faults(value)
+
     def _validated_fault_storage(
         self, record_value: object, *, expected_snapshot_names: set[str] | None = None,
     ) -> tuple[tuple[Fault, ...], dict[str, tuple[Fault, ...]]]:
         record = record_mapping(record_value)
         if record is None:
             raise ValueError("Stored fault state is invalid")
-        if record.get("storage_schema_version") not in {5, 6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}:
+        if record.get("storage_schema_version") not in {5, 6, 7, 8, 9, 10, 11, 12, 13, STORAGE_SCHEMA_VERSION}:
             return (), {}
-        faults = validate_faults(record.get("faults"))
+        faults = self._validated_stored_faults(record.get("faults"), legacy=record["storage_schema_version"] < STORAGE_SCHEMA_VERSION)
         raw_snapshots = record.get("fault_snapshots")
         expected_names = set(self._named_snapshots) if expected_snapshot_names is None else expected_snapshot_names
         if not isinstance(raw_snapshots, Mapping) or set(raw_snapshots) != expected_names:
@@ -2009,235 +1239,77 @@ class HorizonIQEntryRuntime:
         snapshots: dict[str, tuple[Fault, ...]] = {}
         for name, values in raw_snapshots.items():
             normalized = _snapshot_name(name)
-            snapshots[normalized] = validate_faults(values)
+            snapshots[normalized] = self._validated_stored_faults(values, legacy=record["storage_schema_version"] < STORAGE_SCHEMA_VERSION)
         return faults, snapshots
 
     def _validated_storage_record(
-        self,
-        record_value: object,
-        *,
-        operating_mode: str,
-    ) -> tuple[
-        SimulationSnapshot,
-        bool,
-        dict[str, str],
-        tuple[str | None, str | None, str],
-        tuple[ReplaySession | None, float | None, bool | None, bool | None, bool, bool, bool],
-        tuple[AcceptedCommandId, ...],
-        BatteryConfig,
-    ]:
+        self, record_value: object, *, operating_mode: str,
+    ) -> tuple[SimulationSnapshot, bool, dict[str, str], tuple[AcceptedCommandId, ...], BatteryConfig]:
         record = record_mapping(record_value)
         if record is None:
             raise ValueError("Stored state is not an object")
-        storage_schema = record.get("storage_schema_version")
-        if storage_schema not in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}:
+        version = record.get("storage_schema_version")
+        if type(version) is not int or not 1 <= version <= STORAGE_SCHEMA_VERSION:
             raise ValueError("Unsupported storage schema")
-        if record.get("snapshot_schema_version") not in {1, 2, 3, SNAPSHOT_SCHEMA_VERSION}:
+        if type(record.get("snapshot_schema_version")) is not int or record["snapshot_schema_version"] not in {1, 2, 3, 4, 5}:
             raise ValueError("Unsupported snapshot schema")
-        if record.get("entry_id") != self.entry_id:
-            raise ValueError("Stored entry identity does not match")
-        if record.get("registration_id") != self.registration_id:
-            raise ValueError("Stored registration identity does not match")
-        if record.get("pretend_gx_id") != self.pretend_gx_id:
-            raise ValueError("Stored GX identity does not match")
+        for key, expected in (("entry_id", self.entry_id), ("registration_id", self.registration_id), ("pretend_gx_id", self.pretend_gx_id)):
+            if record.get(key) != expected:
+                raise ValueError("Stored entry identity does not match")
         if not isinstance(record.get("simulator_enabled"), bool):
             raise ValueError("Stored enabled state is invalid")
+        if self._config is None:
+            raise ValueError("Sandbox configuration is unavailable")
+        config = (
+            _control_config_from_storage(record.get("control_config"), fallback=self._config)
+            if version >= 8 else self._config
+        )
         serialized = record.get("current_snapshot")
         if not isinstance(serialized, str):
             raise ValueError("Stored snapshot is invalid")
-        control_config = self._config
-        if control_config is None:
-            raise ValueError("Sandbox configuration is unavailable")
-        if storage_schema in {8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}:
-            control_config = _control_config_from_storage(
-                record.get("control_config"),
-                fallback=control_config,
-            )
-        snapshots_value = record.get("snapshots", {})
-        if not isinstance(snapshots_value, Mapping):
+        snapshot = self._validated_snapshot(from_json(serialized), config=config)
+        snapshot = replace(
+            snapshot, active_command=None,
+            command_status=CommandStatus.FALLBACK_MISSING, playback_state="stopped",
+        )
+        raw_snapshots = record.get("snapshots", {})
+        if not isinstance(raw_snapshots, Mapping) or len(raw_snapshots) > MAX_NAMED_SNAPSHOTS:
             raise ValueError("Stored snapshots are invalid")
         snapshots: dict[str, str] = {}
-        if len(snapshots_value) > MAX_NAMED_SNAPSHOTS:
-            raise ValueError("Stored snapshot limit is invalid")
-        for name, snapshot_json in snapshots_value.items():
+        for name, value in raw_snapshots.items():
             normalized = _snapshot_name(name)
-            if normalized in snapshots or not isinstance(snapshot_json, str):
+            if normalized in snapshots or not isinstance(value, str):
                 raise ValueError("Stored snapshot is invalid")
-            self._validated_snapshot(from_json(snapshot_json), config=control_config)
-            snapshots[normalized] = snapshot_json
-        profile_state: tuple[str | None, str | None, str] = (None, None, "stopped")
-        if (
-            operating_mode == "replay"
-            and storage_schema in {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}
-        ):
-            filename = record.get("selected_profile_filename")
-            profile_hash = record.get("profile_hash")
-            playback_state = record.get("playback_state")
-            if filename is not None and (not isinstance(filename, str) or not filename):
-                raise ValueError("Stored profile selection is invalid")
-            if filename is None and profile_hash is not None:
-                raise ValueError("Stored profile hash is invalid")
-            if filename is not None and (
-                not isinstance(profile_hash, str) or len(profile_hash) != 64
-            ):
-                raise ValueError("Stored profile hash is invalid")
-            if playback_state not in _PLAYBACK_STATES:
-                raise ValueError("Stored playback state is invalid")
-            profile_state = (filename, profile_hash, playback_state)
-        replay_state: tuple[ReplaySession | None, float | None, bool | None, bool | None, bool, bool, bool] = (
-            None,
-            None,
-            None,
-            None,
-            False,
-            False,
-            False,
+            decoded = self._validated_snapshot(from_json(value), config=config)
+            snapshots[normalized] = to_json(decoded)
+        now = (
+            self._live_forecast_now().astimezone(timezone.utc)
+            if operating_mode == "virtual" else snapshot.clock_state.virtual_time_utc
         )
-        if (
-            operating_mode == "replay"
-            and storage_schema in {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}
-        ):
-            session_value = record.get("replay_session")
-            starting_energy = record.get("replay_starting_energy_wh")
-            import_for_export = record.get("replay_import_for_export_enabled")
-            export_for_solar_headroom = record.get("replay_export_for_solar_headroom")
-            pending_resume = record.get("replay_pending_resume")
-            auto_resume = (
-                record.get("replay_auto_resume_pending")
-                if storage_schema in {4, 5, 6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}
-                else None
-            )
-            simulate_api_failure = (
-                record.get("replay_simulate_api_failure")
-                if storage_schema in {8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}
-                else False
-            )
-            if session_value is None:
-                if any(
-                    value is not None
-                    for value in (
-                        starting_energy,
-                        import_for_export,
-                        export_for_solar_headroom,
-                    )
-                ) or pending_resume is not False or (
-                    storage_schema in {4, 5, 6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION} and auto_resume is not False
-                ) or simulate_api_failure is not False:
-                    raise ValueError("Stored replay state is invalid")
-            else:
-                session = ReplaySession.from_dict(session_value)
-                if isinstance(starting_energy, bool):
-                    raise ValueError("Stored replay starting energy is invalid")
-                try:
-                    starting_energy = float(starting_energy)
-                except (TypeError, ValueError) as err:
-                    raise ValueError("Stored replay starting energy is invalid") from err
-                if not math.isfinite(starting_energy) or not (
-                    control_config.reserve_wh <= starting_energy <= control_config.capacity_wh
-                ):
-                    raise ValueError("Stored replay starting energy is invalid")
-                if not isinstance(import_for_export, bool) or not isinstance(
-                    export_for_solar_headroom, bool
-                ) or not isinstance(pending_resume, bool):
-                    raise ValueError("Stored replay settings are invalid")
-                if storage_schema in {4, 5, 6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION} and not isinstance(auto_resume, bool):
-                    raise ValueError("Stored replay resume state is invalid")
-                if not isinstance(simulate_api_failure, bool):
-                    raise ValueError("Stored replay simulated API failure state is invalid")
-                if session.profile_identifier != filename or session.profile_hash != profile_hash:
-                    raise ValueError("Stored replay profile identity is invalid")
-                replay_state = (
-                    session,
-                    starting_energy,
-                    import_for_export,
-                    export_for_solar_headroom,
-                    pending_resume,
-                    (
-                        auto_resume
-                        if storage_schema in {4, 5, 6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}
-                        else session.state in _REPLAY_ACTIVE_STATES or pending_resume
-                    ),
-                    simulate_api_failure,
-                )
-        snapshot = (
-            self._validated_virtual_snapshot(serialized, config=control_config)
-            if operating_mode == "virtual"
-            else self._validated_snapshot(from_json(serialized), config=control_config)
+        ledger = (
+            ledger_from_storage(record.get("accepted_command_ids"), now)
+            if version >= 6 else ()
         )
-        command_ledger = (
-            ledger_from_storage(
-                record.get("accepted_command_ids"),
-                (
-                    self._runtime_now_utc()
-                    if operating_mode == "virtual"
-                    else snapshot.clock_state.virtual_time_utc
-                ),
-            )
-            if storage_schema in {6, 7, 8, 9, 10, 11, 12, STORAGE_SCHEMA_VERSION}
-            else ()
-        )
-        return (
-            snapshot,
-            record["simulator_enabled"],
-            snapshots,
-            profile_state,
-            replay_state,
-            command_ledger,
-            control_config,
-        )
+        return snapshot, record["simulator_enabled"], snapshots, ledger, config
 
-    def _validated_virtual_snapshot(
-        self,
-        serialized: str,
-        *,
-        config: BatteryConfig,
-    ) -> SimulationSnapshot:
-        """Validate Virtual battery data while ignoring stale Replay-only fields."""
-        try:
-            raw = json.loads(serialized)
-        except (TypeError, ValueError) as err:
-            raise ValueError("Stored snapshot is invalid") from err
-        if not isinstance(raw, dict):
-            raise ValueError("Stored snapshot is invalid")
-        raw["clock_state"] = {
-            "virtual_time_utc": self._runtime_now_utc().isoformat(),
-            "rate": ClockRate.PAUSED.value,
-            "sequence": 0,
-            "reset_generation": 0,
-        }
-        raw["active_profile_id"] = None
-        raw["profile_cursor"] = None
-        raw["selected_profile_filename"] = None
-        raw["profile_hash"] = None
-        raw["playback_state"] = "stopped"
-        raw["replay_session"] = None
-        raw["active_command"] = None
-        raw["command_status"] = CommandStatus.NO_ACTION.value
-        return self._validated_snapshot(
-            from_json(json.dumps(raw, separators=(",", ":"))),
-            config=config,
-        )
 
     def _simulation_snapshot(self) -> SimulationSnapshot:
         if self._state is None or self._clock is None:
             raise ValueError("Sandbox state is unavailable")
         return SimulationSnapshot(
-            SNAPSHOT_SCHEMA_VERSION,
-            self._state,
-            self._cumulative_ledger,
-            self._clock.state,
-            self._active_profile_id,
-            self._profile_cursor,
-            self._command,
-            self.last_command_status,
-            self.load_w,
-            self.solar_w,
-            _control_config_to_storage(self._config),
-            self._playback_state,
-            self._selected_profile_filename,
-            self._profile_hash,
-            self._replay_session.to_dict() if self._replay_session is not None else None,
-            tuple(fault.to_dict() for fault in self._faults_for_storage()),
+            schema_version=SNAPSHOT_SCHEMA_VERSION,
+            battery_state=self._state,
+            cumulative_ledger=self._cumulative_ledger,
+            clock_state=self._clock.state,
+            active_profile_id=self._active_profile_id,
+            profile_cursor=self._profile_cursor,
+            active_command=self._command if self._operating_mode == "manual" else None,
+            command_status=self.last_command_status,
+            load_w=self.load_w,
+            solar_w=self.solar_w,
+            control_config=_control_config_to_storage(self._config),
+            playback_state="stopped",
+            faults=tuple(fault.to_dict() for fault in self._faults_for_storage()),
         )
 
     def _validated_snapshot(
@@ -2273,20 +1345,10 @@ class HorizonIQEntryRuntime:
             raise ValueError("Snapshot inputs are invalid")
         if snapshot.playback_state not in _PLAYBACK_STATES:
             raise ValueError("Snapshot playback state is invalid")
-        if (snapshot.selected_profile_filename is None) != (snapshot.profile_hash is None):
-            raise ValueError("Snapshot profile identity is invalid")
-        if snapshot.selected_profile_filename is not None and (
-            not isinstance(snapshot.selected_profile_filename, str)
-            or not isinstance(snapshot.profile_hash, str)
-            or len(snapshot.profile_hash) != 64
-        ):
-            raise ValueError("Snapshot profile identity is invalid")
         if snapshot.control_config is not None:
             _control_config_from_storage(snapshot.control_config, fallback=active_config)
         if snapshot.faults:
             validate_faults(list(snapshot.faults))
-        if snapshot.replay_session is not None:
-            ReplaySession.from_dict(snapshot.replay_session)
         ClockRate(snapshot.clock_state.rate)
         if (
             snapshot.clock_state.virtual_time_utc.tzinfo is None
@@ -2334,7 +1396,7 @@ class HorizonIQEntryRuntime:
         config: BatteryConfig | None,
     ) -> None:
         """Discard partially restored values without persisting over the record."""
-        await self.async_disable(checkpoint=False)
+        await self.async_disable(resume_coordinator=False, checkpoint=False)
         self._config = config
         self._apply_snapshot(snapshot)
         self.load_w = snapshot.load_w
@@ -2345,15 +1407,8 @@ class HorizonIQEntryRuntime:
         self._named_fault_snapshots = {}
         self._accepted_command_ids = ()
         self._clear_pending_command()
-        self._clear_profile_state()
-        self._replay_session = None
-        self._replay_starting_energy_wh = None
-        self._replay_import_for_export_enabled = None
-        self._replay_export_for_solar_headroom = None
-        self._replay_simulate_api_failure = False
-        self._replay_pending_resume = False
-        self._replay_auto_resume_pending = False
-        self._prepared_replay_request = None
+        self._active_profile_id = None
+        self._profile_cursor = None
         self._playback_state = "stopped"
         self._mqtt_emulation_enabled = False
         self._mqtt_fault_disconnected = False
@@ -2362,6 +1417,8 @@ class HorizonIQEntryRuntime:
         self._clear_external_power()
         self._cancel_pending_checkpoint()
         self._reset_node_red_status()
+        await self.coordinator.async_pause_for_sandbox()
+        self._coordinator_paused = True
 
     def current_capacity(self) -> str:
         """Return this runtime's capacity in Wh for the forecast request."""
@@ -2402,8 +1459,9 @@ class HorizonIQEntryRuntime:
                 self._clock.reset(self._runtime_now_utc())
                 self._clock.set_rate(ClockRate.PAUSED)
                 self._initialize_virtual_schedule()
-            await self.coordinator.async_pause_for_sandbox()
-            self._coordinator_paused = True
+            if not self._coordinator_paused:
+                await self.coordinator.async_pause_for_sandbox()
+                self._coordinator_paused = True
             self._subscribe_to_coordinator_forecasts()
             subscription_start = len(self._unsubscribers)
             try:
@@ -2425,8 +1483,6 @@ class HorizonIQEntryRuntime:
                 if fault.state is FaultState.ACTIVE:
                     self._schedule_fault_expiry(fault)
             await self._async_refresh_direct_forecast()
-            if self._mqtt_emulation_enabled:
-                await self._async_resume_pending_replay()
             create_background_task = getattr(hass, "async_create_background_task", None)
             if callable(create_background_task):
                 self._task = create_background_task(
@@ -2461,8 +1517,6 @@ class HorizonIQEntryRuntime:
                 CommandLifecycleState.FAILED,
                 "Sandbox runtime stopped before command correlation completed.",
             )
-        self._cancel_replay_timeout()
-        self._cancel_replay_heartbeat()
         self._cancel_virtual_schedule()
         self._clear_external_power()
         self._command = Command(OperatingMode.SELF_CONSUMPTION)
@@ -2476,11 +1530,6 @@ class HorizonIQEntryRuntime:
         self._cancel_all_fault_work()
         self._mqtt_fault_disconnected = False
         self._mqtt_emulation_enabled = False
-        if self._replay_session is not None and self._replay_session.state in (
-            _REPLAY_ACTIVE_STATES | {ReplayState.RUNNING, ReplayState.PAUSED}
-        ):
-            self._replay_pending_resume = True
-            self._replay_auto_resume_pending = True
         self.simulator_enabled = False
         task, self._task = self._task, None
         if task is not None and task is not asyncio.current_task():
@@ -2492,7 +1541,7 @@ class HorizonIQEntryRuntime:
                 await result
         self._unsubscribers.clear()
         self._hass = None
-        if self._coordinator_paused and resume_coordinator:
+        if self._coordinator_paused and resume_coordinator and self._operating_mode == "virtual":
             self._coordinator_paused = False
             await self.coordinator.async_resume_from_sandbox()
         elif self._coordinator_paused:
@@ -2507,6 +1556,7 @@ class HorizonIQEntryRuntime:
         await self.async_disable(resume_coordinator=False, checkpoint=False)
         await self.async_checkpoint(immediate=True, enabled_override=was_enabled)
         self._unloaded = True
+        self._entry_hass = None
         self._listeners.clear()
 
     def set_clock_rate(self, rate: ClockRate) -> None:
@@ -2515,8 +1565,8 @@ class HorizonIQEntryRuntime:
             raise RuntimeError("Sandbox runtime has been unloaded")
         if self._clock is None:
             raise ValueError("Sandbox is unavailable")
-        if self._operating_mode != "replay":
-            raise ValueError("Clock controls are available only in Replay mode")
+        if self._operating_mode != "manual":
+            raise ValueError("Clock controls are available only in Manual mode")
         self._clock.set_rate(rate)
         self._schedule_immediate_checkpoint()
         self._notify_listeners()
@@ -2527,8 +1577,6 @@ class HorizonIQEntryRuntime:
             raise ValueError("Sandbox is inactive")
         if self._clock is None:
             raise ValueError("Sandbox is unavailable")
-        if self._replay_session is not None and self._replay_session.state is ReplayState.PAUSED:
-            return
         self._clock.step(seconds)
         await self._async_refresh_direct_forecast()
         if self._operating_mode == "virtual":
@@ -2553,11 +1601,6 @@ class HorizonIQEntryRuntime:
             )
         else:
             await self._async_simulate(seconds, hass=self._hass)
-        if self._replay_session is not None and self._replay_session.state in {
-            ReplayState.RUNNING,
-            ReplayState.PAUSED,
-        }:
-            await self._async_publish_replay_clock(immediate=True)
         await self._async_publish_runtime_statuses(force=True)
         await self.async_checkpoint(immediate=True)
 
@@ -2578,7 +1621,7 @@ class HorizonIQEntryRuntime:
         self.last_command_status = CommandStatus.AWAITING_FORECAST
         self.last_command_reason = "Awaiting direct forecast."
         self._direct_forecast_health = "awaiting_forecast"
-        if self._operating_mode == "replay":
+        if self._operating_mode == "manual":
             self._clock.reset(self._live_forecast_now().astimezone(timezone.utc))
         self._schedule_immediate_checkpoint()
         self._notify_listeners()
@@ -2673,12 +1716,6 @@ class HorizonIQEntryRuntime:
                 or self._state is None
             ):
                 raise ValueError("Sandbox is inactive")
-            if self._playback_state == "running" or (
-                self._replay_session is not None
-                and self._replay_session.state
-                in (_REPLAY_ACTIVE_STATES | {ReplayState.RUNNING, ReplayState.PAUSED})
-            ):
-                raise ValueError("Stop profile playback or replay before setting state of charge")
             reserve_percent = self._config.reserve_wh / self._config.capacity_wh * 100
             if not reserve_percent <= state_of_charge <= 100:
                 raise ValueError(
@@ -2718,8 +1755,8 @@ class HorizonIQEntryRuntime:
         """Apply one deterministic built-in scenario without loading a profile."""
         from .simulation.profiles import standard_scenarios
 
-        if not self.simulator_enabled or self._clock is None:
-            raise ValueError("Sandbox is inactive")
+        if not self.simulator_enabled or self._clock is None or self._operating_mode != "manual":
+            raise ValueError("Manual sandbox is inactive")
         selected = next(
             (item for item in standard_scenarios(self._runtime_now_utc())
              if item.identifier == scenario),
@@ -2729,11 +1766,8 @@ class HorizonIQEntryRuntime:
             raise ValueError("Scenario is invalid")
         period = selected.profile.periods[0]
         self._playback_state = "stopped"
-        self._active_profile = None
-        self._active_profile_id = None
-        self._profile_cursor = None
-        self._selected_profile_filename = None
-        self._profile_hash = None
+        self._active_profile_id = selected.profile.identifier
+        self._profile_cursor = ProfileCursor(selected.profile.identifier, 0)
         self._command = Command(OperatingMode.SELF_CONSUMPTION)
         await self.async_set_inputs(load_w=period.load_w, solar_w=period.solar_w)
 
@@ -2867,11 +1901,6 @@ class HorizonIQEntryRuntime:
                 CommandLifecycleState.EXPIRED,
                 "Issued command expired before correlation completed.",
             )
-        if self._replay_session is not None and self._replay_session.state is ReplayState.PAUSED:
-            return
-        if self._playback_state == "running" and self._active_profile is not None:
-            await self._async_play_profile_interval(start_time, end_time, hass=hass)
-            return
         await self._async_simulate_segment(
             elapsed_seconds,
             end_time,
@@ -2880,65 +1909,6 @@ class HorizonIQEntryRuntime:
             hass=hass,
         )
 
-    async def _async_play_profile_interval(
-        self,
-        start_time: datetime,
-        end_time: datetime,
-        *,
-        hass: HomeAssistant | None,
-    ) -> None:
-        if self._active_profile is None or self._profile_cursor is None:
-            return
-        current = start_time
-        while current < end_time and self._playback_state == "running":
-            index = self._profile_cursor.index
-            if index >= len(self._active_profile.samples):
-                await self._async_complete_replay()
-                return
-            sample = self._active_profile.samples[index]
-            sample_end = sample.timestamp_utc + timedelta(minutes=5)
-            if current < sample.timestamp_utc or current >= sample_end:
-                raise ValueError("Virtual clock is outside the selected profile")
-            segment_end = min(end_time, sample_end)
-            await self._async_apply_direct_replay_action(segment_end)
-            await self._async_simulate_segment(
-                (segment_end - current).total_seconds(),
-                segment_end,
-                sample.load_w,
-                sample.solar_w,
-                hass=hass,
-            )
-            current = segment_end
-            if current == sample_end:
-                self._profile_cursor = ProfileCursor(
-                    self._active_profile.identifier,
-                    index + 1,
-                )
-                if self._profile_cursor.index == len(self._active_profile.samples):
-                    await self._async_complete_replay()
-                elif current.minute % 30 == 0 and current.second == 0:
-                    await self._async_publish_replay_clock(immediate=True)
-
-    async def _async_apply_direct_replay_action(self, virtual_now_utc: datetime) -> None:
-        """Apply the cached replay horizon only at the owning virtual time."""
-        if self._direct_replay_payload is None or self._config is None:
-            return
-        try:
-            direct = parse_replay_command(
-                self._direct_replay_payload,
-                virtual_now_utc=virtual_now_utc,
-                config=self._config,
-            )
-            if direct.replay_key != self._last_direct_replay_key:
-                self._command = direct.command
-                self._last_direct_replay_key = direct.replay_key
-                self.last_command_status = CommandStatus.APPLIED
-                self.last_command_reason = direct.action
-        except ValueError:
-            self._command = Command(OperatingMode.SELF_CONSUMPTION)
-            self.last_command_status = CommandStatus.FALLBACK_INVALID
-            self.last_command_reason = "Direct replay rejected; self-consumption used."
-            await self._async_fail_replay("Direct replay horizon is invalid.")
 
     async def _async_simulate_segment(
         self,
@@ -3593,13 +2563,6 @@ class HorizonIQEntryRuntime:
         self._unsubscribers.append(
             await mqtt.async_subscribe(
                 hass,
-                replay_status_topic(self.pretend_gx_id),
-                self._async_handle_replay_status,
-            )
-        )
-        self._unsubscribers.append(
-            await mqtt.async_subscribe(
-                hass,
                 node_red_status_topic(self.pretend_gx_id),
                 self._async_handle_node_red_status,
             )
@@ -3630,96 +2593,13 @@ class HorizonIQEntryRuntime:
         self._node_red_status = status
         self._notify_listeners()
 
-    async def _async_handle_replay_status(self, message: mqtt.ReceiveMessage) -> None:
-        """Accept only one valid, in-order status for this entry's active replay."""
-        if (
-            self._unloaded
-            or not self.simulator_enabled
-            or self._mqtt_fault_disconnected
-            or inbound_is_retained(message)
-            or self.pretend_gx_id is None
-            or self._replay_session is None
-            or self._replay_session.state not in _REPLAY_ACTIVE_STATES
-        ):
-            return
-        try:
-            payload = json.loads(message.payload)
-            status = validate_remote_status(
-                payload,
-                owning_gx_device_id=self.pretend_gx_id,
-                active_replay_id=self._replay_session.replay_id,
-            )
-            if self._replay_simulate_api_failure and (
-                status.state.value != "failed"
-                or status.reason != SIMULATED_REPLAY_API_FAILURE_REASON
-            ):
-                return
-            updated = apply_remote_status(self._replay_session, status)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return
-        self._replay_session = updated
-        if updated.state in {
-            ReplayState.READY,
-            ReplayState.REJECTED,
-            ReplayState.FAILED,
-        }:
-            self._cancel_replay_timeout()
-        if updated.state is ReplayState.READY:
-            await self._async_start_ready_replay()
-            return
-        await self.async_checkpoint(immediate=True)
-        await self._async_publish_runtime_statuses(force=True)
-        self._notify_listeners()
-
-    def _schedule_replay_timeout(self, replay_id: str) -> None:
-        self._cancel_replay_timeout()
-        if self._hass is None or self._unloaded:
-            return
-        hass = self._hass
-        self._replay_timeout_handle = hass.loop.call_later(
-            _REPLAY_READINESS_TIMEOUT_SECONDS,
-            self._async_replay_timeout_due,
-            hass,
-            replay_id,
-        )
-
-    def _async_replay_timeout_due(self, hass: HomeAssistant, replay_id: str) -> None:
-        self._replay_timeout_handle = None
-        hass.async_create_task(self._async_mark_replay_timeout(hass, replay_id))
-
-    async def _async_mark_replay_timeout(
-        self,
-        hass: HomeAssistant,
-        replay_id: str,
-    ) -> None:
-        if (
-            self._unloaded
-            or not self.simulator_enabled
-            or self._hass is not hass
-            or self._replay_session is None
-            or self._replay_session.replay_id != replay_id
-            or self._replay_session.state not in {ReplayState.REQUESTING, ReplayState.LOADING}
-        ):
-            return
-        self._replay_session = replace(
-            self._replay_session,
-            state=ReplayState.FAILED,
-            last_remote_reason=_REPLAY_TIMEOUT_REASON,
-        )
-        await self.async_checkpoint(immediate=True)
-        await self._async_publish_runtime_statuses(force=True)
-        self._notify_listeners()
-
-    def _cancel_replay_timeout(self) -> None:
-        if self._replay_timeout_handle is not None:
-            self._replay_timeout_handle.cancel()
-            self._replay_timeout_handle = None
 
     async def _async_handle_victron_write(self, message: mqtt.ReceiveMessage) -> None:
         """Collect only exact W writes for this entry's pending issued command."""
         if (
             self._unloaded
             or not self.simulator_enabled
+            or self._operating_mode != "virtual"
             or self._mqtt_fault_disconnected
             or inbound_is_retained(message)
             or self.pretend_gx_id is None
@@ -3793,6 +2673,7 @@ class HorizonIQEntryRuntime:
         if (
             self._unloaded
             or not self.simulator_enabled
+            or self._operating_mode != "virtual"
             or self._mqtt_fault_disconnected
             or inbound_is_retained(message)
             or self.pretend_gx_id is None
@@ -4047,7 +2928,7 @@ class HorizonIQEntryRuntime:
         elif self._mqtt_fault_disconnected:
             state = SimulatorStatusState.UNHEALTHY
             reason = "Sandbox MQTT bridge is faulted."
-        elif self._operating_mode == "replay" and (
+        elif self._operating_mode == "manual" and (
             self._clock.state.rate == ClockRate.PAUSED.value
             or self._playback_state == "paused"
         ):
@@ -4073,7 +2954,7 @@ class HorizonIQEntryRuntime:
             energyBalanceHealthy=(self.last_health is SimulationHealth.HEALTHY if ready else None),
             energyBalanceErrorWh=(self._cumulative_ledger.balance_error_wh if ready else None),
             mqttState=(self._mqtt_status_state().value if ready else None),
-            replayState=(self._replay_status_state().value if ready else None),
+            replayState=None,
             commandState=(self._command_status_state().value if ready else None),
         )
 
@@ -4093,8 +2974,6 @@ class HorizonIQEntryRuntime:
         )
 
     def _playback_status_state(self) -> PlaybackStatusState:
-        if self._replay_session is not None and self._replay_session.state is ReplayState.FAILED:
-            return PlaybackStatusState.FAILED
         return {
             "paused": PlaybackStatusState.PAUSED,
             "running": PlaybackStatusState.RUNNING,
@@ -4106,20 +2985,6 @@ class HorizonIQEntryRuntime:
             return MqttStatusState.FAULTED
         return MqttStatusState.CONNECTED if self._hass is not None else MqttStatusState.DISCONNECTED
 
-    def _replay_status_state(self) -> ReplayStatusState:
-        if self._replay_session is None:
-            return ReplayStatusState.NONE
-        return {
-            ReplayState.REQUESTING: ReplayStatusState.PENDING,
-            ReplayState.LOADING: ReplayStatusState.PENDING,
-            ReplayState.STOPPED: ReplayStatusState.PENDING,
-            ReplayState.READY: ReplayStatusState.READY,
-            ReplayState.RUNNING: ReplayStatusState.RUNNING,
-            ReplayState.PAUSED: ReplayStatusState.RUNNING,
-            ReplayState.COMPLETED: ReplayStatusState.COMPLETED,
-            ReplayState.FAILED: ReplayStatusState.FAILED,
-            ReplayState.REJECTED: ReplayStatusState.REJECTED,
-        }.get(self._replay_session.state, ReplayStatusState.NONE)
 
     def _command_status_state(self) -> CommandStatusState:
         if self._pending_command is not None:
@@ -4186,6 +3051,7 @@ class HorizonIQEntryRuntime:
     def _schedule_checkpoint(self) -> None:
         if (
             self._storage is None
+            or self._storage_restore_failed
             or self._hass is None
             or self._unloaded
             or self._checkpoint_handle is not None
@@ -4252,16 +3118,6 @@ def _fault_status_item(fault: Fault) -> FaultStatusItem:
     )
 
 
-def _registration_toggle(
-    config: Mapping[str, object],
-    pascal_name: str,
-    camel_name: str,
-) -> bool:
-    """Read one registration-owned boolean, defaulting only when absent."""
-    value = config.get(pascal_name, config.get(camel_name, False))
-    if not isinstance(value, bool):
-        raise ValueError(f"{pascal_name} must be boolean")
-    return value
 
 
 _CONTROL_CONFIG_FIELDS = (
@@ -4290,7 +3146,7 @@ def _requires_ledger_migration(record: Mapping[str, object]) -> bool:
 
 
 def _snapshot_without_corrupted_ledger(snapshot: SimulationSnapshot) -> SimulationSnapshot:
-    """Preserve replayable state while clearing values written with shifted fields."""
+    """Preserve local state while clearing values written with shifted fields."""
     return replace(
         snapshot,
         schema_version=SNAPSHOT_SCHEMA_VERSION,

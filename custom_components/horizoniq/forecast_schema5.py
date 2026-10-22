@@ -1,4 +1,4 @@
-"""Strict, entry-local HorizonIQ schema-5/6 forecast diagnostics models."""
+"""Strict, entry-local HorizonIQ schema-5/6/7/8 forecast diagnostics models."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ import math
 
 
 LEGACY_SCHEMA_VERSION = 5
-SCHEMA_VERSION = 6
-SUPPORTED_SCHEMA_VERSIONS = frozenset({LEGACY_SCHEMA_VERSION, SCHEMA_VERSION})
-PLAN_KINDS = frozenset({"live", "import_for_export_advisory", "sandbox_replay"})
+SCHEMA_VERSION = 8
+SUPPORTED_SCHEMA_VERSIONS = frozenset({5, 6, 7, 8})
+PLAN_KINDS = frozenset({"live", "import_for_export_advisory"})
 SCHEMA5_PERIOD_DURATION = timedelta(minutes=30)
 REASON_CODES = frozenset(
     {
@@ -68,7 +68,7 @@ _NORMALIZED_PROHIBITED_DIAGNOSTIC_KEYS = frozenset(
 
 
 class Schema5ForecastError(ValueError):
-    """Raised when a schema-5/6 forecast is incomplete or malformed."""
+    """Raised when a schema-5/6/7/8 forecast is incomplete or malformed."""
 
 
 def adapt_schema5_wire(payload: Mapping[str, object]) -> dict[str, object] | None:
@@ -84,12 +84,22 @@ def adapt_schema5_wire(payload: Mapping[str, object]) -> dict[str, object] | Non
     source = _forecast_source(payload)
     if _alias_value(source, "schemaVersion") is _MISSING:
         return None
+    if _alias_value(source, "schemaVersion") == 8:
+        if _alias_value(source, "plannedEnergyLedger") is not _MISSING:
+            raise Schema5ForecastError("Schema-8 diagnostics are invalid.")
+        diagnostics = _alias_value(source, "diagnostics")
+        if isinstance(diagnostics, (Mapping, list)):
+            _reject_prohibited_diagnostic_keys(diagnostics)
     return _adapt_object(
         source,
         _FORECAST_FIELDS,
         children={
             "economicsAssumptions": (_ECONOMICS_FIELDS, {}),
             "plannedEnergyLedger": (_LEDGER_FIELDS, {}),
+            "diagnostics": (
+                ("plannedEnergyLedger",),
+                {"plannedEnergyLedger": (_LEDGER_FIELDS, {})},
+            ),
             "equipmentProfile": (_EQUIPMENT_FIELDS, {}),
             "periods": (
                 _PERIOD_FIELDS,
@@ -148,6 +158,7 @@ _FORECAST_FIELDS = (
     "effectiveAtUtc",
     "economicsAssumptions",
     "plannedEnergyLedger",
+    "diagnostics",
     "equipmentProfile",
     "currentCapacity",
     "minCapacity",
@@ -185,7 +196,7 @@ _EQUIPMENT_FIELDS = (
 )
 _PERIOD_FIELDS = (
     "period", "date", "price", "shouldImport", "shouldUseGrid", "shouldExport",
-    "recommendedAction", "simulationAction", "executableAction", "commandId",
+    "recommendedAction", "executableAction", "commandId",
     "issuedAtUtc", "expiresAtUtc", "actionPriority", "expectedImport",
     "expectedExport", "expectedStartSoc", "expectedEndSoc", "expectedCost",
     "expectedRevenue", "expectedNetValue", "amount", "imported", "exported",
@@ -240,7 +251,7 @@ def _adapt_object(
             for alias in _aliases(retired_field):
                 value = source.get(alias)
                 if isinstance(value, Mapping):
-                    _reject_prohibited_retired_profile_keys(value)
+                    _reject_prohibited_diagnostic_keys(value)
     result: dict[str, object] = {}
     for field in fields:
         value = _alias_value(source, field)
@@ -265,14 +276,14 @@ def _adapt_object(
     return result
 
 
-def _reject_prohibited_retired_profile_keys(
+def _reject_prohibited_diagnostic_keys(
     value: Mapping[object, object] | list[object],
 ) -> None:
-    """Check discarded legacy profile objects before dropping them."""
+    """Check nested objects and lists before dropping unknown diagnostic fields."""
     if isinstance(value, list):
         for item in value:
             if isinstance(item, (Mapping, list)):
-                _reject_prohibited_retired_profile_keys(item)
+                _reject_prohibited_diagnostic_keys(item)
         return
     for key, child in value.items():
         if (
@@ -282,7 +293,7 @@ def _reject_prohibited_retired_profile_keys(
         ):
             raise Schema5ForecastError("schema-5 diagnostics contain a prohibited key")
         if isinstance(child, (Mapping, list)):
-            _reject_prohibited_retired_profile_keys(child)
+            _reject_prohibited_diagnostic_keys(child)
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,7 +333,7 @@ class Schema5DecisionTrace:
 
 @dataclass(frozen=True, slots=True)
 class Schema5Period:
-    """One complete schema-5/6 forecast period."""
+    """One complete schema-5/6/7/8 forecast period."""
 
     period: int
     date: str
@@ -331,7 +342,6 @@ class Schema5Period:
     should_use_grid: bool
     should_export: bool | None
     recommended_action: str
-    simulation_action: str
     executable_action: str
     command_id: str | None
     issued_at_utc: str | None
@@ -363,7 +373,6 @@ class Schema5Period:
             "shouldUseGrid": self.should_use_grid,
             "shouldExport": self.should_export,
             "recommendedAction": self.recommended_action,
-            "simulationAction": self.simulation_action,
             "executableAction": self.executable_action,
             "commandId": self.command_id,
             "issuedAtUtc": self.issued_at_utc,
@@ -389,7 +398,7 @@ class Schema5Period:
 
 @dataclass(frozen=True, slots=True)
 class Schema5Forecast:
-    """Complete normalized schema-5/6 plan retained only in entry-local memory."""
+    """Complete normalized schema-5/6/7/8 plan retained only in entry-local memory."""
 
     schema_version: int
     plan_id: str
@@ -399,7 +408,7 @@ class Schema5Forecast:
     created_at_utc: str
     effective_at_utc: str
     economics_assumptions: dict[str, object]
-    planned_energy_ledger: dict[str, object]
+    planned_energy_ledger: dict[str, object] | None
     equipment_profile: dict[str, object] | None
     current_capacity: float
     min_capacity: float
@@ -423,7 +432,7 @@ class Schema5Forecast:
 
     def to_dict(self) -> dict[str, object]:
         """Return all contract fields without transport credentials or headers."""
-        return {
+        result: dict[str, object] = {
             "schemaVersion": self.schema_version,
             "planId": self.plan_id,
             "planKind": self.plan_kind,
@@ -432,7 +441,6 @@ class Schema5Forecast:
             "createdAtUtc": self.created_at_utc,
             "effectiveAtUtc": self.effective_at_utc,
             "economicsAssumptions": deepcopy(self.economics_assumptions),
-            "plannedEnergyLedger": deepcopy(self.planned_energy_ledger),
             "equipmentProfile": deepcopy(self.equipment_profile),
             "currentCapacity": self.current_capacity,
             "minCapacity": self.min_capacity,
@@ -449,6 +457,14 @@ class Schema5Forecast:
             "saving": self.saving,
             "periods": [period.to_dict() for period in self.periods],
         }
+        if self.schema_version == 8:
+            result["diagnostics"] = (
+                {"plannedEnergyLedger": deepcopy(self.planned_energy_ledger)}
+                if self.planned_energy_ledger is not None else None
+            )
+        else:
+            result["plannedEnergyLedger"] = deepcopy(self.planned_energy_ledger)
+        return result
 
 
 def select_current_schema5_period(
@@ -487,7 +503,7 @@ def select_current_schema5_period(
 
 
 def parse_schema5_forecast(payload: Mapping[str, object]) -> Schema5Forecast | None:
-    """Parse a complete schema-5/6 forecast or reject it before state changes."""
+    """Parse a complete schema-5/6/7/8 forecast or reject it before state changes."""
     source = adapt_schema5_wire(payload)
     if source is None:
         return None
@@ -502,8 +518,10 @@ def parse_schema5_forecast(payload: Mapping[str, object]) -> Schema5Forecast | N
     economics_assumptions = _complete_object(
         source, "economicsAssumptions", _ECONOMICS_FIELDS
     )
-    planned_energy_ledger = _complete_object(
-        source, "plannedEnergyLedger", _LEDGER_FIELDS
+    planned_energy_ledger = (
+        _schema8_ledger(source)
+        if schema_version == 8
+        else _complete_object(source, "plannedEnergyLedger", _LEDGER_FIELDS)
     )
     equipment_profile = _optional_complete_object(
         source, "equipmentProfile", _EQUIPMENT_FIELDS
@@ -602,7 +620,6 @@ def _period(value: object, *, schema_version: int) -> Schema5Period:
         should_use_grid=_boolean(value, "shouldUseGrid"),
         should_export=_should_export(value, schema_version=schema_version),
         recommended_action=_text(value, "recommendedAction"),
-        simulation_action=_text(value, "simulationAction"),
         executable_action=_text(value, "executableAction"),
         command_id=_required_optional_text(value, "commandId"),
         issued_at_utc=_required_optional_timestamp(value, "issuedAtUtc"),
@@ -838,3 +855,28 @@ def _json_value(value: object) -> bool:
     if isinstance(value, list):
         return all(_json_value(item) for item in value)
     return False
+
+
+def _schema8_ledger(source: Mapping[str, object]) -> dict[str, object] | None:
+    """Validate optional diagnostics without making them command authority."""
+    diagnostics = source.get("diagnostics")
+    if diagnostics is None:
+        return None
+    message = "Schema-8 diagnostics are invalid."
+    if not isinstance(diagnostics, Mapping):
+        raise Schema5ForecastError(message)
+    ledger = diagnostics.get("plannedEnergyLedger")
+    if not isinstance(ledger, Mapping) or set(ledger) != set(_LEDGER_FIELDS):
+        raise Schema5ForecastError(message)
+    try:
+        for field in _LEDGER_FIELDS:
+            if field != "healthy":
+                _number(ledger, field)
+        healthy = _boolean(ledger, "healthy")
+        tolerance = _number(ledger, "toleranceKwh")
+        error = _number(ledger, "balanceErrorKwh")
+        if tolerance != 0.001 or healthy != (abs(error) <= tolerance):
+            raise Schema5ForecastError(message)
+    except Schema5ForecastError:
+        raise Schema5ForecastError(message) from None
+    return deepcopy(dict(ledger))

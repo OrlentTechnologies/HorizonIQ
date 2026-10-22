@@ -27,7 +27,7 @@ from custom_components.horizoniq.services import async_setup_services
 from custom_components.horizoniq.select import (
     SandboxEquipmentProfileSelect,
     SandboxFaultKindSelect,
-    SandboxProfileSelect,
+    SandboxClockRateSelect,
 )
 from custom_components.horizoniq.sensors import (
     SandboxRuntimeSensor,
@@ -193,13 +193,13 @@ def test_fault_selector_uses_friendly_enum_labels() -> None:
 
 
 def test_profile_controls_expose_selection_state_and_virtual_availability() -> None:
-    """Profile selection remains known but is disabled outside Replay mode."""
+    """Manual clock and registration-equipment selections retain local availability."""
     runtime = _runtime()
-    profile = SandboxProfileSelect(runtime, runtime.entry_id)
+    profile = SandboxClockRateSelect(runtime, runtime.entry_id)
     equipment = SandboxEquipmentProfileSelect(runtime, runtime.entry_id)
 
-    assert profile.current_option == "Not selected"
-    assert "Not selected" in profile.options
+    assert profile.current_option == "paused"
+    assert "paused" in profile.options
     assert profile.available is False
     assert equipment.available is True
     profile._remove_listener()
@@ -319,3 +319,36 @@ async def test_mutating_services_reject_inactive_and_unknown_entries(hass) -> No
             {"entry_id": "unknown", "name": "never"},
             blocking=True,
         )
+
+
+async def test_manual_input_entities_preserve_local_load_and_solar_controls(hass) -> None:
+    """Manual input entities use the existing local physics bounds and ownership."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+    from custom_components.horizoniq.number import async_setup_entry
+
+    runtime = _runtime("manual-input-controls")
+    await runtime.async_restore_storage(hass)
+    await runtime.async_select_operating_mode("manual")
+    hass.data.setdefault(DOMAIN, {})[runtime.entry_id] = runtime
+    entry = MockConfigEntry(domain=DOMAIN, entry_id=runtime.entry_id, data={}, title="Manual")
+    entities = []
+    await async_setup_entry(hass, entry, entities.extend)
+    controls = {entity._description.key: entity for entity in entities}
+    assert "load_w" in controls and "solar_w" in controls
+    for entity in entities:
+        entity._remove_listener()
+    await controls["load_w"].async_set_native_value(1_200)
+    await controls["solar_w"].async_set_native_value(400)
+    assert runtime.load_w == 1_200 and runtime.solar_w == 400
+    assert controls["load_w"].native_value == 1_200
+    assert controls["solar_w"].native_value == 400
+    for value in (-1, 100_001, float("inf")):
+        with pytest.raises(ValueError):
+            await controls["solar_w"].async_set_native_value(value)
+    assert runtime.load_w == 1_200 and runtime.solar_w == 400
+    await runtime.async_select_operating_mode("virtual")
+    virtual = []
+    await async_setup_entry(hass, entry, virtual.extend)
+    assert "solar_w" not in {entity._description.key for entity in virtual}
+    for entity in virtual:
+        entity._remove_listener()

@@ -101,11 +101,11 @@ async def test_storage_restores_entry_local_mode_and_charging_source(hass) -> No
     assert restored.charging_source == "external"
     assert restored.external_power_w is None
 
-    await source.async_select_operating_mode("replay")
+    await source.async_select_operating_mode("manual")
     replay_restored, _ = _runtime("storage-mode-source", REGISTRATION_A)
     await replay_restored.async_restore_storage(hass)
 
-    assert replay_restored.operating_mode == "replay"
+    assert replay_restored.operating_mode == "manual"
     assert replay_restored.charging_source == "virtual_battery"
 
 
@@ -141,7 +141,6 @@ async def test_schema_twelve_mode_migration_is_idempotent_and_mode_aware(hass) -
     record = virtual._storage_record()
     record["storage_schema_version"] = 12
     snapshot = json.loads(record["current_snapshot"])
-    snapshot["clock_state"] = "unused-invalid-clock"
     snapshot["replay_session"] = {"unused": "invalid"}
     record["current_snapshot"] = json.dumps(snapshot, separators=(",", ":"))
     record["replay_session"] = {"unused": "invalid"}
@@ -173,7 +172,7 @@ async def test_schema_twelve_mode_migration_is_idempotent_and_mode_aware(hass) -
 
     replay, _ = _runtime("storage-schema-twelve-replay", REGISTRATION_A)
     await replay.async_restore_storage(hass)
-    await replay.async_select_operating_mode("replay")
+    await replay.async_select_operating_mode("manual")
     replay_time = datetime(2026, 8, 4, 8, tzinfo=timezone.utc)
     assert replay._clock is not None
     replay._clock = replay._clock.from_state(ClockState(replay_time, "paused"))
@@ -184,7 +183,7 @@ async def test_schema_twelve_mode_migration_is_idempotent_and_mode_aware(hass) -
 
     replay_restored, _ = _runtime("storage-schema-twelve-replay", REGISTRATION_A)
     await replay_restored.async_restore_storage(hass)
-    assert replay_restored.operating_mode == "replay"
+    assert replay_restored.operating_mode == "manual"
     assert replay_restored.virtual_time_utc == replay_time
 
 
@@ -213,8 +212,6 @@ async def test_virtual_restore_rejects_invalid_core_battery_state(hass) -> None:
         "load",
         "record_validation",
         "fault_validation",
-        "profile_restore",
-        "replay_restore",
         "enable",
     ),
 )
@@ -251,14 +248,6 @@ async def test_storage_restore_failures_are_staged_sanitized_and_non_destructive
     elif stage == "fault_validation":
         monkeypatch.setattr(
             restored, "_validated_fault_storage", Mock(side_effect=failure)
-        )
-    elif stage == "profile_restore":
-        monkeypatch.setattr(
-            restored, "_async_restore_profile_state", AsyncMock(side_effect=failure)
-        )
-    elif stage == "replay_restore":
-        monkeypatch.setattr(
-            restored, "_async_restore_replay_state", AsyncMock(side_effect=failure)
         )
     else:
         monkeypatch.setattr(restored, "async_enable", AsyncMock(side_effect=failure))
@@ -316,7 +305,7 @@ async def test_save_reload_restore_preserves_state_without_time_jump(hass) -> No
     """Disabled Replay state restores exactly and does not advance during downtime."""
     runtime, _ = _runtime("storage-reload", REGISTRATION_A)
     await runtime.async_restore_storage(hass)
-    await runtime.async_select_operating_mode("replay")
+    await runtime.async_select_operating_mode("manual")
     await _enable(runtime, hass)
     runtime.set_inputs(load_w=1_000, solar_w=0)
     await runtime.async_step()
@@ -331,14 +320,14 @@ async def test_save_reload_restore_preserves_state_without_time_jump(hass) -> No
     assert reloaded.virtual_time_utc == restored_time
     assert reloaded.energy_wh == restored_energy
     assert reloaded.storage_diagnostic is None
-    coordinator.async_pause_for_sandbox.assert_not_awaited()
+    coordinator.async_pause_for_sandbox.assert_awaited_once()
 
 
 async def test_enabled_runtime_restart_restores_only_its_clock_and_task(hass) -> None:
     """An enabled entry restarts from its saved virtual time without wall-clock catchup."""
     runtime, _ = _runtime("storage-enabled", REGISTRATION_A)
     await runtime.async_restore_storage(hass)
-    await runtime.async_select_operating_mode("replay")
+    await runtime.async_select_operating_mode("manual")
     await _enable(runtime, hass)
     await runtime.async_step()
     saved_time = runtime.virtual_time_utc
@@ -429,7 +418,7 @@ async def test_schema_ten_ledger_migration_resets_only_corrupted_ledgers(hass) -
     """The positional-ledger release keeps state but clears current and named totals."""
     runtime, _ = _runtime("storage-ledger-migration", REGISTRATION_A)
     await runtime.async_restore_storage(hass)
-    await runtime.async_select_operating_mode("replay")
+    await runtime.async_select_operating_mode("manual")
     await _enable(runtime, hass)
     runtime.set_inputs(load_w=750, solar_w=100)
     await runtime.async_step(30)
@@ -465,7 +454,7 @@ async def test_schema_ten_ledger_migration_resets_only_corrupted_ledgers(hass) -
     migrated = await SandboxStorage(hass, "storage-ledger-migration").async_load()
     assert migrated is not None
     assert migrated["storage_schema_version"] == STORAGE_SCHEMA_VERSION
-    assert migrated["snapshot_schema_version"] == 4
+    assert migrated["snapshot_schema_version"] == 5
 
     reloaded, _ = _runtime("storage-ledger-migration", REGISTRATION_A)
     with patch(
@@ -483,7 +472,7 @@ async def test_reserve_validation_rejects_snapshot_atomically(hass) -> None:
     runtime, _ = _runtime("storage-reserve", REGISTRATION_A)
     await runtime.async_restore_storage(hass)
     invalid = SimulationSnapshot(
-        1,
+        5,
         BatteryState(1),
         IntervalLedger(),
         ClockState(datetime.now(timezone.utc), "paused"),
@@ -591,3 +580,172 @@ async def test_serialized_storage_excludes_secrets_and_actual_telemetry(hass) ->
         "actual",
     ):
         assert forbidden not in serialized
+
+
+def _legacy_replay_record(runtime: HorizonIQEntryRuntime) -> dict[str, object]:
+    """Keep historical wire fields in a test-local migration input only."""
+    from custom_components.horizoniq.simulation.models import ProfileCursor
+    runtime._operating_mode = "manual"
+    runtime._active_profile_id = "idle"
+    runtime._profile_cursor = ProfileCursor("idle", 2)
+    runtime._state = BatteryState(6_000)
+    record = runtime._storage_record()
+    record.update(storage_schema_version=13, snapshot_schema_version=4, operating_mode="replay", simulator_enabled=True)
+    snapshot = json.loads(record["current_snapshot"])
+    snapshot.update(schema_version=4, active_command={"mode": "grid_setpoint", "requested_grid_power_w": 1000}, command_status="applied", playback_state="running", replay_session={"retired": True}, selected_profile_filename="retired.csv", profile_hash="retired")
+    snapshot["clock_state"]["virtual_time_utc"] = "2026-08-04T08:00:00+00:00"
+    record["current_snapshot"] = json.dumps(snapshot)
+    record["snapshots"] = {"keep": json.dumps(snapshot)}
+    record["fault_snapshots"] = {"keep": []}
+    record.update(replay_session={"retired": True}, replay_pending_resume=True, replay_auto_resume_pending=True, selected_profile_filename="retired.csv", profile_hash="retired")
+    return record
+
+
+@pytest.mark.parametrize("retired", ("absent", None, "extra"))
+async def test_replay_state13_migrates_paused_without_remote_resume(hass, retired) -> None:
+    from custom_components.horizoniq.simulation.models import CommandStatus, OperatingMode
+    source, _ = _runtime("legacy-replay", REGISTRATION_A)
+    await source.async_restore_storage(hass)
+    record = _legacy_replay_record(source)
+    for key in tuple(record):
+        if key.startswith("replay_") or key in {"selected_profile_filename", "profile_hash"}:
+            if retired == "absent":
+                record.pop(key)
+            elif retired is None:
+                record[key] = None
+    await source._storage.async_save(record)
+    restored, coordinator = _runtime("legacy-replay", REGISTRATION_A)
+    coordinator.async_fetch_sandbox_forecast = AsyncMock()
+    await restored.async_restore_storage(hass)
+    assert restored.operating_mode == "manual"
+    assert not restored.simulator_enabled
+    assert restored.clock_rate == "paused"
+    assert restored.energy_wh == 6_000
+    assert restored._command.mode is OperatingMode.SELF_CONSUMPTION
+    assert restored.last_command_status is CommandStatus.FALLBACK_MISSING
+    assert restored.list_snapshots() == ("keep",)
+    assert restored.profile_cursor.index == 2
+    assert restored.virtual_time_utc == datetime(2026, 8, 4, 8, tzinfo=timezone.utc)
+    coordinator.async_fetch_sandbox_forecast.assert_not_awaited()
+    coordinator.async_pause_for_sandbox.assert_awaited_once()
+    coordinator.async_resume_from_sandbox.assert_not_awaited()
+    migrated = await SandboxStorage(hass, "legacy-replay").async_load()
+    assert migrated["storage_schema_version"] == 14
+    assert migrated["snapshot_schema_version"] == 5
+    assert migrated["simulator_enabled"] is False
+    assert not any(key.startswith("replay_") or key in {"selected_profile_filename", "profile_hash"} for key in migrated)
+    assert "replay_session" not in migrated["current_snapshot"]
+
+
+@pytest.mark.parametrize("schema", (1, 2, 3, 4))
+async def test_snapshot4_migration_preserves_battery_and_local_faults(hass, schema) -> None:
+    from custom_components.horizoniq.simulation.faults import FaultKind, configure_fault
+    from custom_components.horizoniq.simulation.models import CommandStatus
+    from custom_components.horizoniq.simulation.snapshots import from_json
+    runtime, _ = _runtime("snapshot-four", REGISTRATION_A)
+    record = _legacy_replay_record(runtime)
+    raw = json.loads(record["current_snapshot"])
+    fault = configure_fault(kind=FaultKind.REJECT_COMMAND, activation_utc=datetime(2026, 8, 4, 8, tzinfo=timezone.utc), remaining_count=1)
+    raw["schema_version"] = schema
+    raw["faults"] = [fault.to_dict(), {"kind": "replay_api_failure"}]
+    decoded = from_json(json.dumps(raw))
+    assert decoded.schema_version == 5
+    assert decoded.battery_state.energy_wh == 6_000
+    assert decoded.cumulative_ledger == runtime.energy_ledger
+    assert decoded.profile_cursor == runtime.profile_cursor
+    assert decoded.active_command is None
+    assert decoded.command_status is CommandStatus.FALLBACK_MISSING
+    assert decoded.playback_state == "stopped"
+    assert decoded.faults == (fault.to_dict(),)
+    assert from_json(to_json(decoded)) == decoded
+    runtime._operating_mode = "manual"
+    runtime._named_snapshots = {"legacy": json.dumps(raw), "unrelated": to_json(decoded)}
+    await runtime.async_restore_snapshot("legacy")
+    assert runtime.energy_wh == 6_000
+    assert runtime.list_faults() == (fault,)
+    assert runtime.list_snapshots() == ("legacy", "unrelated")
+
+
+async def test_two_entries_removal_does_not_cross_ownership(hass) -> None:
+    first, first_coordinator = _runtime("migration-own-a", REGISTRATION_A)
+    second, second_coordinator = _runtime("migration-own-b", REGISTRATION_B)
+    for runtime in (first, second):
+        await runtime.async_restore_storage(hass)
+    await first._storage.async_save(_legacy_replay_record(first))
+    await second.async_select_operating_mode("manual")
+    second_coordinator.async_fetch_sandbox_forecast = AsyncMock()
+    await _enable(second, hass)
+    second_task = second._task
+    second_before = second.energy_wh
+    migrated, migrated_coordinator = _runtime("migration-own-a", REGISTRATION_A)
+    await migrated.async_restore_storage(hass)
+    await migrated.async_unload()
+    assert second.simulator_enabled
+    assert second._task is second_task and not second_task.done()
+    assert second.energy_wh == second_before
+    assert migrated._task is None
+    await async_remove_entry_storage(hass, "migration-own-a")
+    assert await SandboxStorage(hass, "migration-own-b").async_load() is not None
+    second_coordinator.async_resume_from_sandbox.assert_not_awaited()
+    migrated_coordinator.async_pause_for_sandbox.assert_awaited_once()
+    first_coordinator.async_pause_for_sandbox.assert_not_awaited()
+    await second.async_unload()
+    assert second_task.done()
+
+
+@pytest.mark.parametrize("field,value", (("battery_state", {"energy_wh": True}), ("battery_state", {"energy_wh": float("nan")}), ("clock_state", None), ("clock_state", {"virtual_time_utc": "2026-08-04T08:00:00+00:00", "rate": "paused", "sequence": True, "reset_generation": 0}), ("load_w", -1), ("solar_w", True), ("faults", [{"kind": "invalid"}]), ("profile_cursor", {"profile_id": "idle", "index": -1})))
+async def test_migration_rejects_invalid_retained_physics_atomically(hass, field, value) -> None:
+    source, _ = _runtime("migration-invalid", REGISTRATION_A)
+    await source.async_restore_storage(hass)
+    record = _legacy_replay_record(source)
+    raw = json.loads(record["current_snapshot"])
+    raw[field] = value
+    record["current_snapshot"] = json.dumps(raw)
+    await source._storage.async_save(record)
+    restored, coordinator = _runtime("migration-invalid", REGISTRATION_A)
+    await restored.async_restore_storage(hass)
+    assert restored.energy_wh == 5_000 and not restored.simulator_enabled
+    assert restored.storage_diagnostic is not None
+    assert restored.list_snapshots() == ()
+    assert await restored._storage.async_load() == record
+    await restored.async_unload()
+    assert await SandboxStorage(hass, "migration-invalid").async_load() == record
+    coordinator.async_pause_for_sandbox.assert_awaited_once()
+
+
+@pytest.mark.parametrize("version,mode,valid", ((13, "absent", True), (13, "replay", True), (14, None, False), (14, "replay", False), (14, "unknown", False), (15, "virtual", False)))
+async def test_mode_migration_defaults_and_invalid_current_modes(hass, version, mode, valid) -> None:
+    source, _ = _runtime("migration-mode", REGISTRATION_A)
+    await source.async_restore_storage(hass)
+    record = _legacy_replay_record(source)
+    record["storage_schema_version"] = version
+    if mode == "absent":
+        record.pop("operating_mode")
+    else:
+        record["operating_mode"] = mode
+    await source._storage.async_save(record)
+    restored, coordinator = _runtime("migration-mode", REGISTRATION_A)
+    await restored.async_restore_storage(hass)
+    assert not restored.simulator_enabled
+    if valid:
+        assert restored.energy_wh == 6_000
+        assert restored.operating_mode == ("virtual" if mode == "absent" else "manual")
+    else:
+        assert restored.energy_wh == 5_000 and restored.storage_diagnostic
+    coordinator.async_pause_for_sandbox.assert_awaited_once()
+
+
+@pytest.mark.parametrize("field,value", (("schema_version", 6), ("schema_version", True), ("schema_version", 0), ("battery_state", {"energy_wh": -1}), ("cumulative_ledger", {"balance_error_wh": True}), ("active_command", {"mode": "grid_preservation", "requested_grid_power_w": 0}), ("active_command", {"mode": "grid_setpoint", "requested_grid_power_w": True}), ("active_command", {"mode": "grid_setpoint", "requested_grid_power_w": float("inf")}), ("active_command", {"mode": "unknown"}), ("playback_state", "invalid")))
+async def test_snapshot_versions_and_current_manual_validation_fail_closed(field, value) -> None:
+    from custom_components.horizoniq.simulation.models import Command, OperatingMode
+    runtime, _ = _runtime("snapshot-invalid-current", REGISTRATION_A)
+    runtime._operating_mode = "manual"
+    runtime._command = Command(OperatingMode.GRID_PRESERVATION, None)
+    await runtime.async_save_snapshot("good")
+    raw = json.loads(runtime._named_snapshots["good"])
+    raw[field] = value
+    runtime._named_snapshots["bad"] = json.dumps(raw)
+    before = (runtime.energy_wh, runtime._command, runtime.energy_ledger, runtime._clock.state, dict(runtime._named_snapshots))
+    with pytest.raises(ValueError):
+        await runtime.async_restore_snapshot("bad")
+    assert (runtime.energy_wh, runtime._command, runtime.energy_ledger, runtime._clock.state, dict(runtime._named_snapshots)) == before

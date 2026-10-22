@@ -319,6 +319,7 @@ async def test_sandbox_devices_are_entry_scoped_and_persist_across_unload(
 
     coordinator = MagicMock()
     coordinator.async_refresh = AsyncMock()
+    coordinator.async_pause_for_sandbox = AsyncMock()
     with (
         patch("custom_components.horizoniq._ensure_local_docs", AsyncMock()),
         patch(

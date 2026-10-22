@@ -278,26 +278,25 @@ def _async_remove_stale_sandbox_entities(
     if not runtime.is_sandbox_configured:
         return
     stale: set[tuple[str, str]] = {
-        ("number", build_unique_id("Sandbox", entry.entry_id, "solar_w")),
         ("select", build_unique_id("Sandbox", entry.entry_id, "equipment_profile")),
+        ("select", build_unique_id("Sandbox", entry.entry_id, "profile")),
+        ("switch", build_unique_id("Sandbox", entry.entry_id, "profile_playback")),
+        ("button", build_unique_id("Sandbox", entry.entry_id, "profile_reset")),
     }
     if runtime.operating_mode == "virtual":
         stale.update(
             {
+                ("number", build_unique_id("Sandbox", entry.entry_id, "solar_w")),
                 ("sensor", build_unique_id("Sandbox", entry.entry_id, "clock")),
                 ("sensor", build_unique_id("Sandbox", entry.entry_id, "profile_cursor")),
                 ("select", build_unique_id("Sandbox", entry.entry_id, "clock_rate")),
-                ("select", build_unique_id("Sandbox", entry.entry_id, "profile")),
                 ("select", build_unique_id("Sandbox", entry.entry_id, "scenario")),
-                ("switch", build_unique_id("Sandbox", entry.entry_id, "profile_playback")),
                 ("button", build_unique_id("Sandbox", entry.entry_id, "simulation_step")),
-                ("button", build_unique_id("Sandbox", entry.entry_id, "profile_reset")),
             }
         )
     else:
         stale.update(
             {
-                ("number", build_unique_id("Sandbox", entry.entry_id, "load_w")),
                 ("select", build_unique_id("Sandbox", entry.entry_id, "charging_source")),
             }
         )

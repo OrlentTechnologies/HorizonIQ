@@ -115,15 +115,11 @@ async def test_telemetry_disconnect_and_cleanup_faults(hass) -> None:
     assert next(item for item in runtime.list_faults() if item.fault_id==disconnect.fault_id).state is FaultState.EXHAUSTED
     await runtime.async_disable()
 
-async def test_replay_command_and_runtime_restart_faults_are_local(hass) -> None:
+async def test_command_and_runtime_restart_faults_are_local(hass) -> None:
     """C2B consumes only valid owning operations and preserves unrelated state."""
     runtime=_runtime("fault-c2b"); await runtime.async_restore_storage(hass)
     with patch("custom_components.horizoniq.sandbox_runtime.mqtt.async_subscribe",new=AsyncMock(return_value=lambda: None)):
         await runtime.async_enable(hass)
-    replay=await runtime.async_configure_fault(kind=FaultKind.REPLAY_API_FAILURE,activation_utc=runtime.virtual_time_utc,remaining_count=1)
-    await runtime.async_activate_fault(replay.fault_id)
-    # No selected profile: the fault remains local and cannot fabricate a backend request.
-    with pytest.raises(ValueError): await runtime.async_start_replay_session()
     command=await runtime.async_configure_fault(kind=FaultKind.REJECT_COMMAND,activation_utc=runtime.virtual_time_utc,remaining_count=1)
     await runtime.async_activate_fault(command.fault_id)
     before=runtime._command

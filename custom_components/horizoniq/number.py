@@ -53,6 +53,10 @@ _CONTROLS = (
 )
 
 
+_MANUAL_SOLAR_CONTROL = _ControlDescription(
+    "solar_w", "Solar", 0, MAX_ABSOLUTE_POWER_W, 10, UnitOfPower.WATT
+)
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -62,7 +66,9 @@ async def async_setup_entry(
     runtime: HorizonIQEntryRuntime = hass.data[DOMAIN][config_entry.entry_id]
     if runtime.is_sandbox_configured:
         controls = (
-            _CONTROLS if runtime.operating_mode == "virtual" else _CONTROLS[1:]
+            _CONTROLS
+            if runtime.operating_mode == "virtual"
+            else (*_CONTROLS, _MANUAL_SOLAR_CONTROL)
         )
         async_add_entities(
             [
@@ -113,8 +119,8 @@ class SandboxNumber(NumberEntity):
         if key == "set_state_of_charge":
             soc_percent = self._runtime.soc_percent
             return round(soc_percent, 1) if soc_percent is not None else None
-        if key == "load_w":
-            return round(self._runtime.load_w, 1)
+        if key in {"load_w", "solar_w"}:
+            return round(getattr(self._runtime, key), 1)
         value = getattr(self._runtime, key)
         if value is None:
             return None
@@ -139,10 +145,10 @@ class SandboxNumber(NumberEntity):
         if key == "set_state_of_charge":
             await self._runtime.async_set_state_of_charge(value)
             return
-        if key == "load_w":
+        if key in {"load_w", "solar_w"}:
             await self._runtime.async_set_inputs(
-                load_w=value,
-                solar_w=self._runtime.solar_w,
+                load_w=value if key == "load_w" else self._runtime.load_w,
+                solar_w=value if key == "solar_w" else self._runtime.solar_w,
             )
             return
         await self._runtime.async_set_control_value(

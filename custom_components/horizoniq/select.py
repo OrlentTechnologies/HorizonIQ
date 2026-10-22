@@ -37,7 +37,6 @@ async def async_setup_entry(
             entities.extend(
                 [
                     SandboxClockRateSelect(runtime, config_entry.entry_id),
-                    SandboxProfileSelect(runtime, config_entry.entry_id),
                     SandboxScenarioSelect(runtime, config_entry.entry_id),
                 ]
             )
@@ -88,46 +87,11 @@ class SandboxClockRateSelect(_SandboxSelect):
 
     @property
     def available(self) -> bool:
-        return super().available and self._runtime.operating_mode == "replay"
+        return super().available and self._runtime.operating_mode == "manual"
 
     async def async_select_option(self, option: str) -> None:
         """Change only this sandbox's virtual-clock rate."""
         self._runtime.set_clock_rate(ClockRate(option))
-
-
-
-class SandboxProfileSelect(_SandboxSelect):
-    """Choose one validated profile stored in this entry's owned directory."""
-
-    _attr_name = "Replay profile"
-    _not_selected = "Not selected"
-    _attr_options: list[str] = [_not_selected]
-
-    def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str) -> None:
-        super().__init__(runtime, entry_id, "profile")
-        self._attr_options = [self._not_selected]
-
-    @property
-    def current_option(self) -> str | None:
-        return self._runtime.selected_profile_filename or self._not_selected
-
-    @property
-    def available(self) -> bool:
-        """Profiles are a deterministic Replay-mode control."""
-        return super().available and self._runtime.operating_mode == "replay"
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-        self._attr_options = [
-            self._not_selected,
-            *await self._runtime.async_list_profile_filenames(),
-        ]
-        self.async_write_ha_state()
-
-    async def async_select_option(self, option: str) -> None:
-        if option == self._not_selected:
-            return
-        await self._runtime.async_select_profile(option)
 
 
 class SandboxScenarioSelect(_SandboxSelect):
@@ -173,7 +137,7 @@ class SandboxOperatingModeSelect(_SandboxSelect):
     """Choose the only sandbox modes; Live equipment control is never an option."""
 
     _attr_name = "Operating mode"
-    _attr_options = ["virtual", "replay"]
+    _attr_options = ["virtual", "manual"]
 
     def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str) -> None:
         super().__init__(runtime, entry_id, "operating_mode")

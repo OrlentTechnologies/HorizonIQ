@@ -147,9 +147,8 @@ async def test_exact_subscriptions_reject_retained_writes_and_refreshes(hass) ->
     assert [call.args[1] for call in subscribe.await_args_list] == [
         *[command_topic(runtime.pretend_gx_id or "", key) for key in VictronCommandKey],
         refresh_topic(runtime.pretend_gx_id or ""),
-            command_issued_topic(runtime.pretend_gx_id or ""),
-            f"horizoniq/sandbox/{runtime.pretend_gx_id}/replay/status",
-            node_red_status_topic(runtime.pretend_gx_id or ""),
+        command_issued_topic(runtime.pretend_gx_id or ""),
+        node_red_status_topic(runtime.pretend_gx_id or ""),
     ]
     assert all("#" not in call.args[1] and "+" not in call.args[1] for call in subscribe.await_args_list)
 

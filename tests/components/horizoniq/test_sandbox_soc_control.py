@@ -27,6 +27,13 @@ from custom_components.horizoniq.const import (
 from custom_components.horizoniq.entity_helpers import build_unique_id
 from custom_components.horizoniq.number import _CONTROLS
 from custom_components.horizoniq.simulation.clock import ClockRate
+from custom_components.horizoniq.simulation.topics import (
+    VictronCommandKey,
+    command_issued_topic,
+    command_topic,
+    node_red_status_topic,
+    refresh_topic,
+)
 
 
 REGISTRATION_ID = "33333333-3333-4333-8333-333333333333"
@@ -202,6 +209,11 @@ async def test_service_and_number_update_paused_virtual_battery_entities(hass) -
             "custom_components.horizoniq.coordinator.HorizonIQCoordinator.async_fetch_sandbox_forecast",
             AsyncMock(return_value=None),
         ),
+        # Disabling resumes the coordinator through its scheduled refresh path.
+        patch(
+            "custom_components.horizoniq.coordinator.HorizonIQCoordinator.async_request_refresh",
+            AsyncMock(),
+        ),
         patch("custom_components.horizoniq.sandbox_runtime.mqtt.async_publish", AsyncMock()) as publish,
         patch("custom_components.horizoniq.sandbox_runtime.mqtt.async_subscribe", AsyncMock()) as subscribe,
     ):
@@ -275,8 +287,18 @@ async def test_service_and_number_update_paused_virtual_battery_entities(hass) -
             "switch", "turn_off", {"entity_id": switch}, blocking=True
         )
         assert publish.await_count > 0
-        assert subscribe.await_count == 14
+        gx_id = runtime.pretend_gx_id or ""
+        expected_topics = [
+            *[command_topic(gx_id, key) for key in VictronCommandKey],
+            refresh_topic(gx_id),
+            command_issued_topic(gx_id),
+            node_red_status_topic(gx_id),
+        ]
+        assert [call.args[1] for call in subscribe.await_args_list] == expected_topics * 2
         assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert runtime._task is None
+        assert not runtime._unsubscribers
 
 
 @pytest.mark.asyncio

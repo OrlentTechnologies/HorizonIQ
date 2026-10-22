@@ -161,7 +161,7 @@ async def test_paused_entry_processes_real_coordinator_refresh_without_mqtt(
         assert runtime.energy_wh == energy_before
         assert runtime.virtual_time_utc == NOW
         assert publish.await_count > 0
-        assert subscribe.await_count == 7
+        assert subscribe.await_count == 6
         assert await hass.config_entries.async_unload(entry.entry_id)
 
 

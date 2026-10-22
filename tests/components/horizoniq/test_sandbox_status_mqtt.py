@@ -122,7 +122,7 @@ async def test_exact_schema_two_payloads_triggers_and_semantic_coalescing(hass) 
             "energyBalanceHealthy": True,
             "energyBalanceErrorWh": 0.0,
             "mqttState": "connected",
-            "replayState": "none",
+            "replayState": None,
             "commandState": "none",
         }
         assert faults == {
@@ -162,7 +162,7 @@ async def test_simulator_state_mapping_and_diagnostic_only_reason(hass) -> None:
     assert unhealthy.reason == "Synthetic energy balance is unhealthy."
     runtime.last_health = SimulationHealth.HEALTHY
     assert runtime._build_simulator_status().state is SimulatorStatusState.RUNNING
-    await runtime.async_select_operating_mode("replay")
+    await runtime.async_select_operating_mode("manual")
     await _enable(hass, runtime)
     assert runtime._clock is not None
     runtime._clock.set_rate(ClockRate.PAUSED)
@@ -223,7 +223,7 @@ async def test_status_parser_rejects_schema_one_encoded_data_and_invalid_bounds(
         "playbackState": "none", "operatingState": 1, "socPercent": 50,
         "batteryEnergyWh": 5000, "batteryPowerW": 0, "gridPowerW": 0,
         "energyBalanceHealthy": True, "energyBalanceErrorWh": 0,
-        "mqttState": "connected", "replayState": "none", "commandState": "none",
+        "mqttState": "connected", "replayState": None, "commandState": "none",
     }
     with pytest.raises(ValueError, match="diagnostic"):
         parse_simulator_status(payload)

@@ -357,9 +357,9 @@ async def test_hold_expiry_stale_refresh_and_entry_lifecycle_remain_isolated(has
         )
         assert runtime.simulator_enabled is False
         assert second.simulator_enabled is True
-        await runtime.async_select_operating_mode("replay")
+        await runtime.async_select_operating_mode("manual")
         reloaded = hass.data[DOMAIN][entry.entry_id]
-        assert reloaded.operating_mode == "replay"
+        assert reloaded.operating_mode == "manual"
         assert reloaded._command.mode is OperatingMode.SELF_CONSUMPTION
         assert second._command.mode is OperatingMode.GRID_PRESERVATION
         assert await hass.config_entries.async_unload(entry.entry_id)
@@ -381,12 +381,12 @@ async def test_hold_status_and_restore_use_existing_wire_and_storage_contracts(h
         assert runtime._operating_state().value == 2
         assert runtime.active_setpoint_w is None
         assert runtime._build_simulator_status().to_payload()["schemaVersion"] == 2
-        assert STORAGE_SCHEMA_VERSION == 13
-        assert SNAPSHOT_SCHEMA_VERSION == 4
+        assert STORAGE_SCHEMA_VERSION == 14
+        assert SNAPSHOT_SCHEMA_VERSION == 5
         await runtime.async_save_snapshot("hold")
         await runtime.async_restore_snapshot("hold")
         assert runtime.energy_wh == 2500
-        assert runtime._command.mode is OperatingMode.SELF_CONSUMPTION
+        assert runtime._command is None
         assert await hass.config_entries.async_unload(entry.entry_id)
         aioclient_mock.clear_requests()
         aioclient_mock.get(

@@ -25,7 +25,6 @@ class FaultKind(StrEnum):
     DROP_MQTT = "drop_mqtt"
     DELAY_MQTT = "delay_mqtt"
     MALFORMED_TELEMETRY = "malformed_telemetry"
-    REPLAY_API_FAILURE = "replay_api_failure"
     REJECT_COMMAND = "reject_command"
     MQTT_DISCONNECT = "mqtt_disconnect"
     RUNTIME_RESTART = "runtime_restart"

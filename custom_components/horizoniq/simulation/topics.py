@@ -200,21 +200,6 @@ def faults_status_topic(gx_id: str) -> str:
     return _local_sandbox_topic(gx_id, "faults/status")
 
 
-def replay_request_topic(gx_id: str) -> str:
-    """Build the isolated replay request topic."""
-    return _local_sandbox_topic(gx_id, "replay/request")
-
-
-def replay_status_topic(gx_id: str) -> str:
-    """Build the isolated replay status topic."""
-    return _local_sandbox_topic(gx_id, "replay/status")
-
-
-def clock_status_topic(gx_id: str) -> str:
-    """Build the isolated virtual-clock status topic."""
-    return _local_sandbox_topic(gx_id, "clock/status")
-
-
 def _local_sandbox_topic(gx_id: str, suffix: str) -> str:
     if not is_sandbox_gx_id(gx_id):
         raise ValueError("A sandbox runtime requires a generated GX ID")

@@ -157,6 +157,5 @@ def _selects_import_for_export(period: Schema5Period, plan_kind: str) -> bool:
     action = {
         "live": period.executable_action,
         "import_for_export_advisory": period.recommended_action,
-        "sandbox_replay": period.simulation_action,
     }[plan_kind]
     return action == "import_for_export"

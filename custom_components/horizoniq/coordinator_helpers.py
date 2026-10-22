@@ -72,7 +72,6 @@ def normalize_periods(payload: Mapping[str, object] | None) -> list[ForecastPeri
             _coerce_int(extract_first(item, ("Period", "period", "index"))),
         )
         _add_if_value(period, "executable_action", _coerce_str(extract_first(item, ("executableAction", "executable_action"))))
-        _add_if_value(period, "simulation_action", _coerce_str(extract_first(item, ("simulationAction", "simulation_action"))))
         _add_if_value(period, "recommended_action", _coerce_str(extract_first(item, ("recommendedAction", "recommended_action"))))
         _add_if_value(period, "command_id", _coerce_str(extract_first(item, ("commandId", "command_id"))))
         _add_if_value(period, "issued_at_utc", _coerce_datetime(extract_first(item, ("issuedAtUtc", "issued_at_utc"))))
@@ -495,7 +494,6 @@ def _normalize_direct_period(source: ForecastPeriod) -> DirectForecastPeriod:
         executable_action=_direct_text(
             source.get("executable_action"), "executable_action"
         ),
-        simulation_action=_direct_optional_text(source.get("simulation_action")),
         recommended_action=_direct_optional_text(source.get("recommended_action")),
         command_id=_direct_optional_text(source.get("command_id")),
         issued_at_utc=_direct_optional_timestamp(source.get("issued_at_utc")),

@@ -76,38 +76,16 @@ def _diagnostics_runtime(hass: HomeAssistant, entry_id: str) -> HorizonIQEntryRu
     return runtime
 
 
-def _replay_runtime(hass: HomeAssistant, entry_id: str) -> HorizonIQEntryRuntime:
-    """Return an active sandbox only when its user-selected mode is Replay."""
+def _manual_runtime(hass: HomeAssistant, entry_id: str) -> HorizonIQEntryRuntime:
+    """Return an active sandbox only when its user-selected mode is Manual."""
     runtime = _runtime(hass, entry_id)
-    if runtime.operating_mode != "replay":
-        raise HomeAssistantError("This service is available only in Replay mode")
+    if runtime.operating_mode != "manual":
+        raise HomeAssistantError("This service is available only in Manual mode")
     return runtime
 
 
-async def _async_load_profile(hass: HomeAssistant, call: ServiceCall) -> None:
-    await _replay_runtime(hass, call.data["entry_id"]).async_select_profile(
-        call.data["filename"]
-    )
-
-
-async def _async_start_profile(hass: HomeAssistant, call: ServiceCall) -> None:
-    await _replay_runtime(hass, call.data["entry_id"]).async_start_playback()
-
-
-async def _async_pause_profile(hass: HomeAssistant, call: ServiceCall) -> None:
-    await _replay_runtime(hass, call.data["entry_id"]).async_pause_playback()
-
-
-async def _async_stop_profile(hass: HomeAssistant, call: ServiceCall) -> None:
-    await _replay_runtime(hass, call.data["entry_id"]).async_stop_playback()
-
-
-async def _async_reset_profile(hass: HomeAssistant, call: ServiceCall) -> None:
-    await _replay_runtime(hass, call.data["entry_id"]).async_reset_playback()
-
-
 async def _async_step(hass: HomeAssistant, call: ServiceCall) -> None:
-    await _replay_runtime(hass, call.data["entry_id"]).async_step(
+    await _manual_runtime(hass, call.data["entry_id"]).async_step(
         call.data.get("seconds", 1800)
     )
 
@@ -216,11 +194,6 @@ def async_setup_services(hass: HomeAssistant) -> None:
     hass.data[_SETUP_KEY] = True
     entry_schema = vol.Schema({_ENTRY_ID: str})
     named_schema = vol.Schema({_ENTRY_ID: str, _NAME: str})
-    hass.services.async_register(DOMAIN, "load_profile", _service_handler(hass, _async_load_profile), schema=vol.Schema({_ENTRY_ID: str, vol.Required("filename"): str}))
-    hass.services.async_register(DOMAIN, "start_profile", _service_handler(hass, _async_start_profile), schema=entry_schema)
-    hass.services.async_register(DOMAIN, "pause_profile", _service_handler(hass, _async_pause_profile), schema=entry_schema)
-    hass.services.async_register(DOMAIN, "stop_profile", _service_handler(hass, _async_stop_profile), schema=entry_schema)
-    hass.services.async_register(DOMAIN, "reset_profile", _service_handler(hass, _async_reset_profile), schema=entry_schema)
     hass.services.async_register(DOMAIN, "step", _service_handler(hass, _async_step), schema=vol.Schema({_ENTRY_ID: str, vol.Optional("seconds"): vol.All(vol.Coerce(float), vol.Range(min=0.001, max=86_400))}))
     hass.services.async_register(DOMAIN, "reset", _service_handler(hass, _async_reset), schema=vol.Schema({_ENTRY_ID: str, vol.Optional("energy_wh"): vol.All(vol.Coerce(float), vol.Range(min=0, max=MAX_BATTERY_ENERGY_WH))}))
     hass.services.async_register(DOMAIN, "set_virtual_battery_state_of_charge", _service_handler(hass, _async_set_state_of_charge), schema=vol.Schema({_ENTRY_ID: str, vol.Required("state_of_charge"): _finite_percentage}))

@@ -312,7 +312,7 @@ class ExportSensor(HorizonIQEntity, BinarySensorEntity):
         return forecast if isinstance(forecast, Schema5Forecast) else None
 
     def _current_time_utc(self) -> datetime | None:
-        """Use entry-local virtual/replay time, otherwise the coordinator wall clock."""
+        """Use entry-local virtual/manual time, otherwise the coordinator wall clock."""
         if self._runtime is not None:
             return self._runtime.virtual_time_utc
         return self._now_utc()
@@ -323,8 +323,6 @@ class ExportSensor(HorizonIQEntity, BinarySensorEntity):
         forecast: Schema5Forecast,
     ) -> str:
         """Expose the plan's current action only as bounded diagnostics."""
-        if forecast.plan_kind == "sandbox_replay":
-            return period.simulation_action
         return period.recommended_action
 
     async def async_will_remove_from_hass(self) -> None:

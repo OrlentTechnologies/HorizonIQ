@@ -155,32 +155,6 @@ class HorizonIQCoordinator(DataUpdateCoordinator[HorizonIQSnapshot]):
         self.async_set_updated_data(snapshot)
         return snapshot
 
-    async def async_fetch_sandbox_replay(
-        self, request: Mapping[str, object]
-    ) -> dict[str, object]:
-        """Call the direct replay endpoint without using MQTT or Node-RED."""
-        parsed = urlparse(self._url)
-        query = {"code": self._forecast_function_key}
-        replay_url = urlunparse(
-            parsed._replace(path="/api/reports/forecast/replay", query=urlencode(query))
-        )
-        try:
-            async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
-                async with self._session.post(
-                    replay_url,
-                    json=dict(request),
-                    headers={**self._build_request_headers(), "Content-Type": "application/json"},
-                ) as response:
-                    if response.status != HTTPStatus.OK:
-                        raise UpdateFailed(f"Replay API returned status {response.status}")
-                    payload = await self._read_json_payload(response)
-        except TimeoutError as err:
-            raise UpdateFailed("Timed out fetching HorizonIQ replay") from err
-        except ClientError as err:
-            raise UpdateFailed(f"Error communicating with HorizonIQ replay API: {err}") from err
-        if not isinstance(payload, dict):
-            raise UpdateFailed("Replay API returned an unexpected payload shape")
-        return payload
 
     def set_battery_capacity_provider(
         self, provider: Callable[[], str] | None

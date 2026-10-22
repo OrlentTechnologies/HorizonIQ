@@ -24,8 +24,6 @@ async def async_setup_entry(
         entities: list[SwitchEntity] = [
             SandboxEnableSwitch(runtime, config_entry.entry_id)
         ]
-        if runtime.operating_mode == "replay":
-            entities.append(SandboxProfilePlaybackSwitch(runtime, config_entry.entry_id))
         async_add_entities(entities)
 
 
@@ -67,43 +65,5 @@ class SandboxEnableSwitch(SwitchEntity):
 
     async def async_will_remove_from_hass(self) -> None:
         """Remove the entry-local runtime callback."""
-        self._remove_listener()
-        await super().async_will_remove_from_hass()
-
-
-class SandboxProfilePlaybackSwitch(SwitchEntity):
-    """Start or pause the selected deterministic replay profile."""
-
-    _attr_has_entity_name = True
-    _attr_name = "Profile playback"
-
-    def __init__(self, runtime: HorizonIQEntryRuntime, entry_id: str) -> None:
-        self._runtime = runtime
-        self._attr_unique_id = build_unique_id("Sandbox", entry_id, "profile_playback")
-        self._remove_listener = runtime.add_listener(self.async_write_ha_state)
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        assert self._runtime.pretend_gx_id is not None
-        return virtual_battery_device_info(self._runtime.pretend_gx_id)
-
-    @property
-    def available(self) -> bool:
-        return (
-            self._runtime.virtual_entity_available
-            and self._runtime.operating_mode == "replay"
-        )
-
-    @property
-    def is_on(self) -> bool:
-        return self._runtime.playback_state == "running"
-
-    async def async_turn_on(self, **kwargs: object) -> None:
-        await self._runtime.async_start_playback()
-
-    async def async_turn_off(self, **kwargs: object) -> None:
-        await self._runtime.async_pause_playback()
-
-    async def async_will_remove_from_hass(self) -> None:
         self._remove_listener()
         await super().async_will_remove_from_hass()
