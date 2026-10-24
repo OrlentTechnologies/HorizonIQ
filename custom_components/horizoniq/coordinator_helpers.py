@@ -76,7 +76,6 @@ def normalize_periods(payload: Mapping[str, object] | None) -> list[ForecastPeri
         _add_if_value(period, "command_id", _coerce_str(extract_first(item, ("commandId", "command_id"))))
         _add_if_value(period, "issued_at_utc", _coerce_datetime(extract_first(item, ("issuedAtUtc", "issued_at_utc"))))
         _add_if_value(period, "expires_at_utc", _coerce_datetime(extract_first(item, ("expiresAtUtc", "expires_at_utc"))))
-        _add_if_value(period, "action_priority", _coerce_int(extract_first(item, ("actionPriority", "action_priority"))))
         _add_if_value(period, "expected_import", _coerce_float(extract_first(item, ("expectedImport", "expected_import"))))
         _add_if_value(period, "expected_export", _coerce_float(extract_first(item, ("expectedExport", "expected_export"))))
         _add_if_value(period, "expected_start_soc", _coerce_float(extract_first(item, ("expectedStartSoc", "expected_start_soc"))))
@@ -345,16 +344,6 @@ def normalize_forecast(
     )
     _add_if_value(
         normalized,
-        "cloud_update_enabled",
-        _coerce_bool(
-            extract_first(
-                forecast_source,
-                ("CloudUpdateEnabled", "cloudUpdateEnabled", "cloud_update_enabled"),
-            )
-        ),
-    )
-    _add_if_value(
-        normalized,
         "registration_data",
         _coerce_registration_data_string(
             _extract_registration_data_value(forecast_source)
@@ -498,7 +487,6 @@ def _normalize_direct_period(source: ForecastPeriod) -> DirectForecastPeriod:
         command_id=_direct_optional_text(source.get("command_id")),
         issued_at_utc=_direct_optional_timestamp(source.get("issued_at_utc")),
         expires_at_utc=_direct_optional_timestamp(source.get("expires_at_utc")),
-        action_priority=_direct_optional_int(source.get("action_priority")),
         expected_import_kwh=_direct_optional_float(source.get("expected_import")),
         expected_export_kwh=_direct_optional_float(source.get("expected_export")),
         expected_start_soc_kwh=_direct_optional_float(source.get("expected_start_soc")),
@@ -529,10 +517,6 @@ def _direct_int(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(name)
     return value
-
-
-def _direct_optional_int(value: object) -> int | None:
-    return _direct_int(value, "value") if value is not None else None
 
 
 def _direct_optional_bool(value: object) -> bool | None:
@@ -1183,9 +1167,6 @@ def _looks_like_registration_payload(payload: Mapping[str, object]) -> bool:
         "ShouldImport",
         "shouldImport",
         "should_import",
-        "CloudUpdateEnabled",
-        "cloudUpdateEnabled",
-        "cloud_update_enabled",
         "TotalCost",
         "totalCost",
         "total_cost",

@@ -52,7 +52,7 @@ def _forecast(*, hold=True, capability=True, created=NOW, effective=NOW):
     period["recommendedAction"] = "use_grid" if hold else "self_consumption"
     period["executableAction"] = "none"
     period["simulationAction"] = "none"
-    for key in ("commandId", "issuedAtUtc", "expiresAtUtc", "actionPriority"):
+    for key in ("commandId", "issuedAtUtc", "expiresAtUtc"):
         period[key] = None
     start_kwh = 2.5 if hold else 5.0
     end_kwh = start_kwh if hold else start_kwh - 0.2

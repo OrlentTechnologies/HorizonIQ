@@ -85,7 +85,6 @@
       "commandId": null,
       "issuedAtUtc": null,
       "expiresAtUtc": null,
-      "actionPriority": null,
       "expectedImport": 0.0,
       "expectedExport": 0.0,
       "expectedStartSoc": 16.3,

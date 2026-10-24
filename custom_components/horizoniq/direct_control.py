@@ -91,14 +91,6 @@ def parse_live_command(
     period_start = period.starts_at_utc
     if not issued <= now_utc < expires or expires != period_start + _HALF_HOUR:
         raise ValueError("Forecast command is stale or expires outside its period")
-    priority = _required_int(period.action_priority, "actionPriority")
-    expected_priority = {
-        "charge_required": 1,
-        "use_grid": 3 if forecast.schema_version in {6, 7, 8} else 4,
-        "import_for_export": 2 if forecast.schema_version in {6, 7, 8} else 5,
-    }[action]
-    if priority != expected_priority:
-        raise ValueError("Forecast actionPriority is invalid")
     command = _direct_command_from_action(
         action=action,
         period=period,
@@ -146,7 +138,7 @@ def _rejection_code(message: str) -> DirectForecastRejection:
         return DirectForecastRejection.CURRENT_PERIOD_MISSING
     if "action is not executable" in message:
         return DirectForecastRejection.ACTION_INVALID
-    if any(field in message for field in ("commandId", "issuedAtUtc", "expiresAtUtc", "actionPriority")):
+    if any(field in message for field in ("commandId", "issuedAtUtc", "expiresAtUtc")):
         return DirectForecastRejection.COMMAND_METADATA_INVALID
     if "stale" in message or "expires" in message or "duration" in message:
         return DirectForecastRejection.COMMAND_WINDOW_INVALID
@@ -348,12 +340,6 @@ def _direct_command_from_action(
 
 
 def _required_timestamp(value: datetime | None, name: str) -> datetime:
-    if value is None:
-        raise ValueError(f"{name} is invalid")
-    return value
-
-
-def _required_int(value: int | None, name: str) -> int:
     if value is None:
         raise ValueError(f"{name} is invalid")
     return value

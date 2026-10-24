@@ -85,12 +85,6 @@ def _payload(*, action: str, plan_kind: str = "live", expires: datetime | None =
             "commandId": str(uuid4()),
             "issuedAtUtc": NOW.isoformat().replace("+00:00", "Z"),
             "expiresAtUtc": end.isoformat().replace("+00:00", "Z"),
-            "actionPriority": {
-                "charge_required": 1,
-                "use_grid": 4,
-                "import_for_export": 5,
-                "export_for_profit": 7,
-            }.get(action, 0),
         }
     )
     trace["selectedAction"] = action
@@ -126,7 +120,6 @@ def _recommended_payload(
         period["commandId"] = None
         period["issuedAtUtc"] = None
         period["expiresAtUtc"] = None
-        period["actionPriority"] = 0
         period["shouldExport"] = action == "export_for_profit"
         period["shouldImport"] = action in {"charge_required", "import_for_export"}
         period["expectedImport"] = expected_import
@@ -153,7 +146,7 @@ def test_live_charge_and_import_are_clamped_to_virtual_limits() -> None:
 def test_live_charge_import_and_hold_ignore_retired_permissions(
     schema_version: int, action: str, legacy_value: object
 ) -> None:
-    """Physical limits and schema priorities govern executable live actions."""
+    """Physical limits govern executable live actions without retired permissions."""
     payload = _payload(action=action)
     payload["schemaVersion"] = schema_version
     period = payload["periods"][0]
@@ -161,11 +154,6 @@ def test_live_charge_import_and_hold_ignore_retired_permissions(
     if schema_version == 6:
         payload["shouldExport"] = False
         period["shouldExport"] = False
-        period["actionPriority"] = {
-            "charge_required": 1,
-            "import_for_export": 2,
-            "use_grid": 3,
-        }[action]
     profile = payload["equipmentProfile"]
     assert isinstance(profile, dict)
     if legacy_value != "absent":
@@ -186,12 +174,6 @@ def test_live_charge_import_and_hold_ignore_retired_permissions(
         if action == "use_grid"
         else OperatingMode.GRID_SETPOINT
     )
-
-    period["actionPriority"] = 9
-    rejected = validate_live_forecast(
-        _coordinator_forecast(payload), now_utc=NOW, config=CONFIG
-    )
-    assert rejected.rejection is DirectForecastRejection.COMMAND_METADATA_INVALID
 
 
 def test_virtual_export_needs_no_profile_permission() -> None:
@@ -679,31 +661,31 @@ def test_missing_or_wrong_schema5_fields_are_rejected() -> None:
 
 
 @pytest.mark.parametrize("version", (6, 7))
-@pytest.mark.parametrize("action,priority", (("charge_required", 1), ("import_for_export", 2), ("use_grid", 3)))
-def test_live_command_uses_current_priority_for6_and7(version, action, priority) -> None:
+@pytest.mark.parametrize("action", ("charge_required", "import_for_export", "use_grid"))
+def test_live_command_for6_and7_requires_no_priority(version, action) -> None:
     payload = _payload(action=action)
     payload["schemaVersion"] = version
     payload["shouldExport"] = False
     period = payload["periods"][0]
-    period.update(shouldExport=False, actionPriority=priority, expectedImport=1.0)
+    period.update(shouldExport=False, expectedImport=1.0)
     period.pop("simulationAction", None)
     direct = parse_live_command(_coordinator_forecast(payload), now_utc=NOW, config=CONFIG)
     assert direct.action == action
     assert direct.command.requested_grid_power_w == (None if action == "use_grid" else 2_000)
-    period["actionPriority"] = priority + 1
-    assert validate_live_forecast(_coordinator_forecast(payload), now_utc=NOW, config=CONFIG).rejection is DirectForecastRejection.COMMAND_METADATA_INVALID
+    period["actionPriority"] = {"ignored": "legacy"}
+    assert parse_live_command(_coordinator_forecast(payload), now_utc=NOW, config=CONFIG) == direct
 
 
 @pytest.mark.parametrize("diagnostics", ("present", "missing", None))
-@pytest.mark.parametrize("action,priority", (("charge_required", 1), ("import_for_export", 2), ("use_grid", 3)))
-def test_schema8_live_commands_keep_current_priorities_and_guards(diagnostics, action, priority) -> None:
+@pytest.mark.parametrize("action", ("charge_required", "import_for_export", "use_grid"))
+def test_schema8_live_commands_keep_guards_without_priority(diagnostics, action) -> None:
     from copy import deepcopy
     from .test_forecast_schema5 import _schema8_payload
     from custom_components.horizoniq.forecast_schema5 import Schema5ForecastError
 
     payload = _schema8_payload(_payload(action=action))
     period = payload["periods"][0]
-    period.update(actionPriority=priority, expectedImport=2.0)
+    period.update(expectedImport=2.0)
     if diagnostics == "missing":
         payload.pop("diagnostics")
     elif diagnostics is None:
@@ -715,7 +697,7 @@ def test_schema8_live_commands_keep_current_priorities_and_guards(diagnostics, a
     assert command.plan_id == payload["planId"]
     assert command.command.expires_at_utc == NOW + timedelta(minutes=30)
     assert command.command.requested_grid_power_w == (None if action == "use_grid" else 2_000)
-    for field, invalid in (("commandId", "invalid"), ("issuedAtUtc", "2026-07-30T12:01:00Z"), ("expiresAtUtc", "2026-07-30T12:29:00Z"), ("actionPriority", priority + 1), ("executableAction", "export_for_profit")):
+    for field, invalid in (("commandId", "invalid"), ("issuedAtUtc", "2026-07-30T12:01:00Z"), ("expiresAtUtc", "2026-07-30T12:29:00Z"), ("executableAction", "export_for_profit")):
         malformed = deepcopy(payload)
         malformed["periods"][0][field] = invalid
         assert validate_live_forecast(_coordinator_forecast(malformed), now_utc=NOW, config=CONFIG).command is None

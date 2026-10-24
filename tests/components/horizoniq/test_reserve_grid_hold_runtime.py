@@ -89,7 +89,6 @@ def _wire(now, *, action="use_grid", energy_wh=2500, cadence=5):
     period["commandId"] = str(uuid4())
     period["issuedAtUtc"] = now.isoformat().replace("+00:00", "Z")
     period["expiresAtUtc"] = end.isoformat().replace("+00:00", "Z")
-    period["actionPriority"] = None if exporting else (3 if hold else 1)
     if exporting:
         for key in ("commandId", "issuedAtUtc", "expiresAtUtc"):
             period[key] = None

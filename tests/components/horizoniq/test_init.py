@@ -533,7 +533,6 @@ async def test_async_setup_entry_sets_cadence_sensor_from_forecast_payload(
         "mediumPrice": 0.1,
         "batteryManagementSystemState": 0,
         "shouldImport": False,
-        "cloudUpdateEnabled": False,
         "forecastCadenceMinutes": 1,
         "hasTrial": True,
         "isActive": True,

@@ -73,7 +73,6 @@ class DirectForecastPeriod:
     command_id: str | None
     issued_at_utc: datetime | None
     expires_at_utc: datetime | None
-    action_priority: int | None
     expected_import_kwh: float | None
     expected_export_kwh: float | None
     expected_start_soc_kwh: float | None
@@ -122,7 +121,6 @@ class ForecastPeriod(TypedDict, total=False):
     command_id: str
     issued_at_utc: str
     expires_at_utc: str
-    action_priority: int
     expected_import: float
     expected_export: float
     expected_start_soc: float
@@ -147,7 +145,6 @@ class ForecastData(TypedDict, total=False):
     battery_management_system_state: str
     should_import: bool
     should_export: bool | None
-    cloud_update_enabled: bool
     currency: str
     registration_data: str
     total_cost: float

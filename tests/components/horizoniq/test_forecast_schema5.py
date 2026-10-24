@@ -145,7 +145,6 @@ def test_complete_schema5_contract_survives_strict_normalization() -> None:
         "commandId",
         "issuedAtUtc",
         "expiresAtUtc",
-        "actionPriority",
         "expectedImport",
         "expectedExport",
         "expectedStartSoc",
@@ -162,6 +161,7 @@ def test_complete_schema5_contract_survives_strict_normalization() -> None:
         "batteryManagementSystemState",
     ):
         assert period[field] == source_period[field]
+    assert "actionPriority" not in period
     assert period["decisionTrace"] == source_period["decisionTrace"]
 
 

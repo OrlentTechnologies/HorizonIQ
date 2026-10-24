@@ -111,11 +111,9 @@ def _schema6_response(
         period["commandId"] = None
         period["issuedAtUtc"] = None
         period["expiresAtUtc"] = None
-        period["actionPriority"] = 0
     else:
         period["issuedAtUtc"] = created_at_utc
         period["expiresAtUtc"] = "2026-07-30T12:30:00Z"
-        period["actionPriority"] = 1
 
     second = forecast["periods"][1]
     second["date"] = "2026-07-30T12:30:00Z"

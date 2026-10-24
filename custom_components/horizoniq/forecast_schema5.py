@@ -197,7 +197,7 @@ _EQUIPMENT_FIELDS = (
 _PERIOD_FIELDS = (
     "period", "date", "price", "shouldImport", "shouldUseGrid", "shouldExport",
     "recommendedAction", "executableAction", "commandId",
-    "issuedAtUtc", "expiresAtUtc", "actionPriority", "expectedImport",
+    "issuedAtUtc", "expiresAtUtc", "expectedImport",
     "expectedExport", "expectedStartSoc", "expectedEndSoc", "expectedCost",
     "expectedRevenue", "expectedNetValue", "amount", "imported", "exported",
     "estimatedGeneration", "used", "battery", "batteryManagementSystemState",
@@ -346,7 +346,6 @@ class Schema5Period:
     command_id: str | None
     issued_at_utc: str | None
     expires_at_utc: str | None
-    action_priority: int | None
     expected_import: float
     expected_export: float
     expected_start_soc: float
@@ -377,7 +376,6 @@ class Schema5Period:
             "commandId": self.command_id,
             "issuedAtUtc": self.issued_at_utc,
             "expiresAtUtc": self.expires_at_utc,
-            "actionPriority": self.action_priority,
             "expectedImport": self.expected_import,
             "expectedExport": self.expected_export,
             "expectedStartSoc": self.expected_start_soc,
@@ -624,7 +622,6 @@ def _period(value: object, *, schema_version: int) -> Schema5Period:
         command_id=_required_optional_text(value, "commandId"),
         issued_at_utc=_required_optional_timestamp(value, "issuedAtUtc"),
         expires_at_utc=_required_optional_timestamp(value, "expiresAtUtc"),
-        action_priority=_required_optional_integer(value, "actionPriority"),
         expected_import=_number(value, "expectedImport"),
         expected_export=_number(value, "expectedExport"),
         expected_start_soc=_number(value, "expectedStartSoc"),
@@ -770,15 +767,6 @@ def _integer(source: Mapping[str, object], key: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise Schema5ForecastError(f"{key} must be an integer")
     return value
-
-
-def _required_optional_integer(source: Mapping[str, object], key: str) -> int | None:
-    """Read a mandatory nullable integer contract field."""
-    if key not in source:
-        raise Schema5ForecastError(f"{key} must be present")
-    if source.get(key) is None:
-        return None
-    return _integer(source, key)
 
 
 def _positive_integer(source: Mapping[str, object], key: str) -> int:

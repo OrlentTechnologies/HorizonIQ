@@ -52,12 +52,8 @@ def _payload(action="use_grid", *, schema=6, authority="live", capability=True):
     period["recommendedAction"] = action
     period["executableAction"] = action if authority == "live" else "none"
     period["decisionTrace"]["selectedAction"] = action
-    period["actionPriority"] = {
-        "charge_required": 1, "import_for_export": 2 if schema in {6, 7, 8} else 5,
-        "use_grid": 3 if schema in {6, 7, 8} else 4,
-    }.get(action)
     if authority != "live":
-        for key in ("commandId", "issuedAtUtc", "expiresAtUtc", "actionPriority"):
+        for key in ("commandId", "issuedAtUtc", "expiresAtUtc"):
             period[key] = None
     else:
         period["commandId"] = str(uuid4())
@@ -147,19 +143,18 @@ def test_all_direct_use_grid_paths_select_grid_preservation():
     assert generic.command.command.requested_grid_power_w is None
 
 
-@pytest.mark.parametrize("schema,action,priority", [
-    (6, "charge_required", 1), (6, "import_for_export", 2), (6, "use_grid", 3),
-    (5, "charge_required", 1), (5, "import_for_export", 5), (5, "use_grid", 4),
+@pytest.mark.parametrize("schema,action", [
+    (6, "charge_required"), (6, "import_for_export"), (6, "use_grid"),
+    (5, "charge_required"), (5, "import_for_export"), (5, "use_grid"),
 ])
-def test_live_priorities_match_each_supported_schema(schema, action, priority):
+def test_live_actions_accept_priority_free_supported_schemas(schema, action):
     payload = _payload(action, schema=schema)
-    assert payload["periods"][0]["actionPriority"] == priority
+    assert "actionPriority" not in payload["periods"][0]
     assert parse_live_command(_forecast(payload), now_utc=NOW, config=CONFIG).action == action
-    for invalid in (None, True, priority + 1):
+    for legacy in (None, True, 99):
         bad = deepcopy(payload)
-        bad["periods"][0]["actionPriority"] = invalid
-        with pytest.raises(ValueError):
-            parse_live_command(_forecast(bad), now_utc=NOW, config=CONFIG)
+        bad["periods"][0]["actionPriority"] = legacy
+        assert parse_live_command(_forecast(bad), now_utc=NOW, config=CONFIG).action == action
     bad = deepcopy(payload)
     bad["schemaVersion"] = 9
     with pytest.raises(Schema5ForecastError, match="Unsupported forecast schemaVersion"):

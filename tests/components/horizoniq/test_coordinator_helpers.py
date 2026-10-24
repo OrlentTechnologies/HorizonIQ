@@ -112,7 +112,6 @@ def test_normalize_forecast_extracts_primary_fields() -> None:
             "MediumPrice": "0.10",
             "BatteryManagementSystemState": "hold",
             "ShouldImport": False,
-            "CloudUpdateEnabled": "true",
             "ForecastCadenceMinutes": "5",
             "RegistrationData": "reg-data",
             "TotalCost": "1.23",
@@ -136,13 +135,109 @@ def test_normalize_forecast_extracts_primary_fields() -> None:
         "medium_price": 0.1,
         "battery_management_system_state": "hold",
         "should_import": False,
-        "cloud_update_enabled": True,
         "forecast_cadence_minutes": 5,
         "registration_data": "reg-data",
         "total_cost": 1.23,
         "charging_cost": 0.45,
         "saving": 0.78,
     }
+
+
+@pytest.mark.parametrize("schema_version", (None, 5, 6, 7, 8))
+@pytest.mark.parametrize("wrapper", (None, "Forecast"))
+@pytest.mark.parametrize(
+    "legacy_fields",
+    (
+        pytest.param({}, id="omitted"),
+        pytest.param({"CloudUpdateEnabled": True}, id="pascal-true"),
+        pytest.param({"CloudUpdateEnabled": False}, id="pascal-false"),
+        pytest.param({"cloudUpdateEnabled": True}, id="camel-true"),
+        pytest.param({"cloudUpdateEnabled": False}, id="camel-false"),
+        pytest.param({"cloud_update_enabled": True}, id="snake-true"),
+        pytest.param({"cloud_update_enabled": False}, id="snake-false"),
+    ),
+)
+def test_cloud_update_enabled_omission_and_legacy_input_preserve_snapshot(
+    schema_version: int | None,
+    wrapper: str | None,
+    legacy_fields: dict[str, object],
+) -> None:
+    """Current plans and legacy extras use the same real normalization path."""
+    if schema_version is None:
+        forecast = {
+            "hash": "legacy-hash",
+            "periods": [{"period": 1, "date": "2026-03-07T10:00:00Z"}],
+            "currentCapacity": 18.5,
+            "shouldImport": True,
+            "forecastCadenceMinutes": 5,
+            "registrationData": "opaque-registration-data",
+        }
+    else:
+        forecast = _schema_payload() if schema_version == 5 else _schema6_payload()
+        forecast["schemaVersion"] = schema_version
+        if schema_version >= 7:
+            for period in forecast["periods"]:
+                period.pop("simulationAction", None)
+        if schema_version == 8:
+            forecast["diagnostics"] = {
+                "plannedEnergyLedger": forecast.pop("plannedEnergyLedger")
+            }
+
+    current_payload = forecast if wrapper is None else {wrapper: forecast}
+    baseline = build_snapshot(deepcopy(current_payload))
+    assert "cloud_update_enabled" not in baseline.forecast
+    assert baseline.forecast["current_capacity"] == forecast["currentCapacity"]
+    assert baseline.should_import is True
+    assert baseline.forecast_cadence_minutes == 5
+    assert baseline.forecast_periods == baseline.forecast["periods"]
+    assert baseline.forecast_periods
+    if schema_version is not None:
+        assert baseline.schema5_forecast is not None
+        assert baseline.direct_forecast is not None
+        assert baseline.forecast_freshness is ForecastFreshness.FRESH
+
+    legacy_forecast = {**deepcopy(forecast), **legacy_fields}
+    payload = legacy_forecast if wrapper is None else {wrapper: legacy_forecast}
+    original = deepcopy(payload)
+
+    assert normalize_forecast(payload) == normalize_forecast(current_payload)
+    assert build_snapshot(payload) == baseline
+    assert payload == original
+
+
+@pytest.mark.parametrize(
+    "alias", ("CloudUpdateEnabled", "cloudUpdateEnabled", "cloud_update_enabled")
+)
+@pytest.mark.parametrize("value", (True, False))
+@pytest.mark.parametrize("wrapper", (None, "Forecast", "forecast", "forecastEntity"))
+def test_legacy_cloud_update_enabled_alone_does_not_make_a_forecast(
+    alias: str, value: bool, wrapper: str | None
+) -> None:
+    """An obsolete flag cannot create forecast data or an executable plan."""
+    legacy_input = {alias: value}
+    payload = legacy_input if wrapper is None else {wrapper: legacy_input}
+
+    assert normalize_forecast(payload) == {}
+    assert build_snapshot(payload) == HorizonIQSnapshot()
+
+
+@pytest.mark.parametrize(
+    "alias", ("CloudUpdateEnabled", "cloudUpdateEnabled", "cloud_update_enabled")
+)
+@pytest.mark.parametrize("value", (True, False))
+def test_legacy_cloud_update_enabled_does_not_disqualify_registration(
+    alias: str, value: bool
+) -> None:
+    """Generic registration handling ignores obsolete extras for source detection."""
+    payload = {"DynamicCharging": True, "ForecastCadenceMinutes": 5, alias: value}
+
+    assert normalize_registration(payload) == payload
+    assert normalize_forecast(payload) == {"forecast_cadence_minutes": 5}
+    snapshot = build_snapshot(payload)
+    assert snapshot.registration == payload
+    assert snapshot.forecast_cadence_minutes == 5
+    assert snapshot.direct_forecast is None
+    assert snapshot.forecast_freshness is ForecastFreshness.MISSING
 
 
 def test_normalize_forecast_extracts_trial_fields() -> None:
@@ -358,7 +453,6 @@ def test_build_snapshot_keeps_forecast_payload_out_of_registration() -> None:
         "targetCapacity": 5760,
         "batteryManagementSystemState": 0,
         "shouldImport": False,
-        "cloudUpdateEnabled": False,
         "forecastCadenceMinutes": 1,
         "registrationData": "encrypted-registration-data",
         "totalCost": 1.340718750000001,
@@ -389,7 +483,6 @@ def test_build_snapshot_keeps_forecast_payload_out_of_registration() -> None:
             "target_capacity": 5760.0,
             "battery_management_system_state": "0",
             "should_import": False,
-            "cloud_update_enabled": False,
             "forecast_cadence_minutes": 1,
             "registration_data": "encrypted-registration-data",
             "total_cost": 1.340718750000001,
